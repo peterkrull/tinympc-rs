@@ -38,10 +38,10 @@ pub struct TinyCache<const Nx: usize, const Nu: usize, F> {
     /// Infinite-time horizon LQR Hessian
     pub Plqr: SMatrix<F,Nx,Nx>,
 
-    /// Precomputed `inv((R + I*rho) + B^T * Pinf * B)`
+    /// Precomputed `inv((R + I*rho) + B^T * Plqr * B)`
     pub RpBPBi: SMatrix<F,Nu,Nu>,
 
-    /// Precomputed `(A - B * Kinf)^T`
+    /// Precomputed `(A - B * Klqr)^T`
     pub AmBKt: SMatrix<F,Nx,Nx>,
 }
 
