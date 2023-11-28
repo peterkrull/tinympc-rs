@@ -33,15 +33,15 @@ pub struct TinySettings<F> {
 pub struct TinyCache<const Nx: usize, const Nu: usize, F> {
 
     /// Infinite-time horizon LQR gain
-    pub Kinf: SMatrix<F,Nu,Nx>,
+    pub Klqr: SMatrix<F,Nu,Nx>,
 
     /// Infinite-time horizon LQR Hessian
-    pub Pinf: SMatrix<F,Nx,Nx>,
+    pub Plqr: SMatrix<F,Nx,Nx>,
 
-    /// Precomputed `inv(R + B^T * Pinf * B)`
-    pub RpBPB_i: SMatrix<F,Nu,Nu>,
+    /// Precomputed `inv((R + I*rho) + B^T * Pinf * B)`
+    pub RpBPBi: SMatrix<F,Nu,Nu>,
 
-    /// Precomputed `inv(A - B * Kinf)^T`
+    /// Precomputed `(A - B * Kinf)^T`
     pub AmBKt: SMatrix<F,Nx,Nx>,
 }
 
@@ -121,9 +121,9 @@ where F: Scalar + SimdValue + RealField + Copy
                 check_termination: 10
             },
             cache: TinyCache {
-                Kinf: K,
-                Pinf: P,
-                RpBPB_i: (SMatrix::from_diagonal(&R.add_scalar(rho)) + B.transpose()*P*B).try_inverse().unwrap(),
+                Klqr: K,
+                Plqr: P,
+                RpBPBi: (SMatrix::from_diagonal(&R.add_scalar(rho)) + B.transpose()*P*B).try_inverse().unwrap(),
                 AmBKt: (A-B*K).transpose(),
             },
             work: TinyWorkspace {
@@ -197,12 +197,12 @@ where F: Scalar + SimdValue + RealField + Copy
     fn forward_pass(&mut self, x: SVector<F,Nx>) {
 
         // Forward-pass with initial state
-        self.work.u.set_column(0, &(-self.cache.Kinf * x - self.work.d.column(0)));
+        self.work.u.set_column(0, &(-self.cache.Klqr * x - self.work.d.column(0)));
         self.work.x.set_column(0, &(self.work.A * x + self.work.B * self.work.u.column(0)));
 
         // Forward-pass for rest of horizon
         for i in 1..Nh {
-            self.work.u.set_column(i, &(-self.cache.Kinf * self.work.x.column(i-1) - self.work.d.column(i)));
+            self.work.u.set_column(i, &(-self.cache.Klqr * self.work.x.column(i-1) - self.work.d.column(i)));
             self.work.x.set_column(i, &(self.work.A * self.work.x.column(i-1) + self.work.B * self.work.u.column(i)));
         }
     }
@@ -241,18 +241,18 @@ where F: Scalar + SimdValue + RealField + Copy
 
         self.work.q += (self.work.g - self.work.vnew).scale(self.settings.rho);
 
-        self.work.p.set_column(Nh - 1, &(-(self.cache.Pinf * xref.column(Nh-1)) - (self.work.vnew.column(Nh - 1).scale(self.settings.rho) - self.work.g.column(Nh - 1))));
+        self.work.p.set_column(Nh - 1, &(-(self.cache.Plqr * xref.column(Nh-1)) - (self.work.vnew.column(Nh - 1).scale(self.settings.rho) - self.work.g.column(Nh - 1))));
     }
 
     /// Update linear terms from Riccati backward pass
     fn backward_pass_grad(&mut self) {
 
         for i in (1..Nh).rev() {
-            self.work.d.set_column(i, &(self.cache.RpBPB_i * (self.work.B.transpose() * self.work.p.column(i) + self.work.r.column(i))));
-            self.work.p.set_column(i - 1, &(self.work.q.column(i - 1) + self.cache.AmBKt * self.work.p.column(i) - (self.cache.Kinf.transpose() * self.work.r.column(i))));
+            self.work.d.set_column(i, &(self.cache.RpBPBi * (self.work.B.transpose() * self.work.p.column(i) + self.work.r.column(i))));
+            self.work.p.set_column(i - 1, &(self.work.q.column(i - 1) + self.cache.AmBKt * self.work.p.column(i) - (self.cache.Klqr.transpose() * self.work.r.column(i))));
         }
 
-        self.work.d.set_column(0, &(self.cache.RpBPB_i * (self.work.B.transpose() * self.work.p.column(0) + self.work.r.column(0))));
+        self.work.d.set_column(0, &(self.cache.RpBPBi * (self.work.B.transpose() * self.work.p.column(0) + self.work.r.column(0))));
     }
 
     /// Check for termination condition by evaluating whether the largest absolute primal and dual residuals for states and inputs are below threhold.
@@ -275,7 +275,6 @@ where F: Scalar + SimdValue + RealField + Copy
                 prim_residual_input < self.settings.prim_tol &&
                 dual_residual_state < self.settings.dual_tol &&
                 dual_residual_input < self.settings.dual_tol;
-
         }
 
         // Save previous slack variables
