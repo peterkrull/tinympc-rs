@@ -64,8 +64,9 @@ pub struct TinyWorkspace<const Nx: usize, const Nu: usize, const Nh: usize, F> {
     q: SMatrix<F,Nx,Nh>,
     r: SMatrix<F,Nu,Nh>,
 
-    // Linear state cost vector
+    // Linear state and input cost vector
     Q: SVector<F,Nx>,
+    R: SVector<F,Nu>,
 
     // Riccati backward pass terms
     p: SMatrix<F,Nx,Nh>,
@@ -92,8 +93,6 @@ where F: Scalar + SimdValue + RealField + Copy
     /// Creates a new [`TinySolver<Nx, Nu, Nz, Nh, F>`].
     ///
     /// ## Arguments
-    /// - `K`: Infinite-horizon LQR gain matrix
-    /// - `P`: Infinite-horizon LQR Hessian matrix
     /// - `A`: State space propagation matrix
     /// - `B`: State space input matrix
     /// - `Q`: State penalty vector
@@ -102,17 +101,20 @@ where F: Scalar + SimdValue + RealField + Copy
     /// Important note about `C`
     #[must_use]
     pub fn new(
-        K:SMatrix<F, Nu, Nx>,
-        P:SMatrix<F, Nx, Nx>,
-        A:SMatrix<F,Nx,Nx>,
-        B:SMatrix<F,Nx,Nu>,
-        Q:SVector<F, Nx>,
-        R:SVector<F, Nu>,
+        A: SMatrix<F,Nx,Nx>,
+        B: SMatrix<F,Nx,Nu>,
+        Q: SVector<F, Nx>,
+        R: SVector<F, Nu>,
         rho : F
-    ) -> Self {
+    ) -> Option<Self> {
         // Many things need to be passed into here
 
-        Self {
+        let Qaug = Q.add_scalar(rho);
+        let Raug = R.add_scalar(rho);
+
+        let (K, P) = lqr(&A, &B, &Qaug, &Raug, 1000)?;
+
+        Some(Self {
             settings: TinySettings {
                 rho,
                 prim_tol: convert(1e-3),
@@ -123,13 +125,14 @@ where F: Scalar + SimdValue + RealField + Copy
             cache: TinyCache {
                 Klqr: K,
                 Plqr: P,
-                RpBPBi: (SMatrix::from_diagonal(&R.add_scalar(rho)) + B.transpose()*P*B).try_inverse().unwrap(),
+                RpBPBi: (SMatrix::from_diagonal(&Raug) + B.transpose()*P*B).try_inverse().unwrap(),
                 AmBKt: (A-B*K).transpose(),
             },
             work: TinyWorkspace {
                 A,
                 B,
-                Q,
+                Q: Qaug,
+                R: Raug,
                 x: SMatrix::zeros(),
                 u: SMatrix::zeros(),
                 q: SMatrix::zeros(),
@@ -146,7 +149,7 @@ where F: Scalar + SimdValue + RealField + Copy
                 x_bound: None,
                 iter: 0,
             }
-        }
+        })
     }
 
     /// # Solve for the optimal MPC solution
@@ -159,7 +162,12 @@ where F: Scalar + SimdValue + RealField + Copy
     /// - the reason for termination, either being convergence or maximum number of iterations
     /// - the optimal actuation `u` to apply to the system 
     ///
-    pub fn tiny_solve(&mut self, x: SVector<F,Nx>, xref: &SMatrix<F,Nx,Nh>) -> (TerminationReason, SVector<F,Nu>) {
+    pub fn tiny_solve(
+        &mut self, 
+        x: SVector<F,Nx>, 
+        xref: &SMatrix<F,Nx,Nh>,
+        uref: &SMatrix<F,Nu,Nh>,
+    ) -> (TerminationReason, SVector<F,Nu>) {
         let mut termination_reason = TerminationReason::MaxIters;
 
         // Iteratively solve MPC problem
@@ -175,7 +183,7 @@ where F: Scalar + SimdValue + RealField + Copy
             self.update_dual();
 
             // Update linear control cost terms
-            self.update_linear_cost(xref);
+            self.update_linear_cost(xref, uref);
 
             // Backward pass to update Ricatti variables
             self.backward_pass_grad();
@@ -227,32 +235,46 @@ where F: Scalar + SimdValue + RealField + Copy
     /// Update next iteration of dual variables by performing the augmented lagrangian multiplier update
     fn update_dual(&mut self) {
         // Gadient ascent
-        self.work.y = self.work.y + self.work.u - self.work.znew;
-        self.work.g = self.work.g + self.work.x - self.work.vnew;
+        self.work.y += self.work.u - self.work.znew;
+        self.work.g += self.work.x - self.work.vnew;
     }
 
     /// Update linear control cost terms in the Riccati feedback using the changing slack and dual variables from ADMM
-    fn update_linear_cost(&mut self, xref: &SMatrix<F,Nx,Nh>) {
-        self.work.r = (self.work.y - self.work.znew).scale(self.settings.rho);
-
-        xref.column_iter().enumerate().for_each(|(i,x)| {
-            self.work.q.set_column(i, &(-x.component_mul(&self.work.Q)))
+    fn update_linear_cost(
+        &mut self,
+        xref: &SMatrix<F,Nx,Nh>, 
+        uref: &SMatrix<F,Nu,Nh>,
+    ) {
+        // Input cost
+        uref.column_iter().enumerate().for_each(|(i,uref)| {
+            self.work.r.set_column(i, &(-uref.component_mul(&self.work.R)))
         });
+        self.work.r += (self.work.y - self.work.znew).scale(self.settings.rho);
 
+        // State cost
+        xref.column_iter().enumerate().for_each(|(i,xref)| {
+            self.work.q.set_column(i, &(-xref.component_mul(&self.work.Q)))
+        });
         self.work.q += (self.work.g - self.work.vnew).scale(self.settings.rho);
 
-        self.work.p.set_column(Nh - 1, &(-(self.cache.Plqr * xref.column(Nh-1)) - (self.work.vnew.column(Nh - 1).scale(self.settings.rho) - self.work.g.column(Nh - 1))));
+        // Terminal condition
+        let q_f = -self.cache.Plqr * xref.column(Nh - 1);
+        let admm_term_f = (self.work.g.column(Nh - 1) - self.work.vnew.column(Nh - 1)).scale(self.settings.rho);
+        self.work.p.set_column(Nh - 1, &(q_f + admm_term_f));
     }
 
     /// Update linear terms from Riccati backward pass
     fn backward_pass_grad(&mut self) {
-
-        for i in (1..Nh).rev() {
-            self.work.d.set_column(i, &(self.cache.RpBPBi * (self.work.B.transpose() * self.work.p.column(i) + self.work.r.column(i))));
-            self.work.p.set_column(i - 1, &(self.work.q.column(i - 1) + self.cache.AmBKt * self.work.p.column(i) - (self.cache.Klqr.transpose() * self.work.r.column(i))));
+        for i in (0..Nh-1).rev() {
+            let p_next = self.work.p.column(i + 1);
+            let r_curr = self.work.r.column(i);
+            
+            let d_val = self.cache.RpBPBi * (self.work.B.transpose() * p_next + r_curr);
+            self.work.d.set_column(i, &d_val);
+            
+            let p_val = self.work.q.column(i) + self.cache.AmBKt * p_next - self.cache.Klqr.transpose() * r_curr;
+            self.work.p.set_column(i, &p_val);
         }
-
-        self.work.d.set_column(0, &(self.cache.RpBPBi * (self.work.B.transpose() * self.work.p.column(0) + self.work.r.column(0))));
     }
 
     /// Check for termination condition by evaluating whether the largest absolute primal and dual residuals for states and inputs are below threhold.
@@ -374,4 +396,27 @@ where F: Scalar + SimdValue + RealField + Copy
 pub enum TerminationReason {
     Converged,
     MaxIters
+}
+
+pub fn lqr<T: RealField + Copy, const Nx: usize, const Nu: usize>(
+    A: &SMatrix<T, Nx, Nx>,
+    B: &SMatrix<T, Nx, Nu>,
+    Qaug: &SVector<T, Nx>,
+    Raug: &SVector<T, Nu>,
+    iters: usize
+) -> Option<(SMatrix<T, Nu, Nx>, SMatrix<T, Nx, Nx>)> {
+    let mut K = SMatrix::zeros();
+    let mut P = SMatrix::from_diagonal(&Qaug);
+
+    for _ in 0..iters {
+        K = (SMatrix::from_diagonal(&Raug) + B.transpose()*P*B).try_inverse()?*(B.transpose()*P*A);
+        P = A.transpose()*P*A - A.transpose()*P*B*K + SMatrix::from_diagonal(&Qaug);
+    }
+
+    // Ensure none of the entries are NaN or infinite
+    if !K.iter().all(|x| x.is_finite()) || !P.iter().all(|x| x.is_finite()) {
+        return None;
+    }
+
+    Some((K, P))
 }

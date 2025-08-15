@@ -12,7 +12,7 @@ const NH:usize = 100;
 
 fn main() {
 
-    let mut mpc = TinySolver::<12, 4, NH, f64>::new(K, P, A, B, Q, R, RHO);
+    let mut mpc = TinySolver::<12, 4, NH, f64>::new(A, B, Q, R, RHO).unwrap();
 
     // Configure settings
     mpc.settings.check_termination = 5;
@@ -42,7 +42,7 @@ fn main() {
     for k in 0..500 {
 
         // Run solvers
-        let (reason,u) = mpc.tiny_solve(x, &xref);
+        let (reason,u) = mpc.tiny_solve(x, &xref, &SMatrix::zeros());
         println!("At step {k:3} in {:4} iterations, got tracking error : {:05.4} - {:?} with u:{:?}",mpc.get_num_iters(),(x-reference).norm(),reason,u);
 
         // Iterate simulation
