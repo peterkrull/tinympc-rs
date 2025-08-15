@@ -13,10 +13,10 @@
 use nalgebra::{SMatrix, SVector, Scalar, SimdValue, RealField, convert};
 
 #[derive(Debug)]
-pub struct TinySolver<const Nx: usize, const Nu: usize, const Nh: usize, F> {
-    pub settings: TinySettings<F>,          // Problem settings
-    pub cache: TinyCache<Nx,Nu,F>,       // Problem cache
-    pub work: TinyWorkspace<Nx,Nu,Nh,F>, // Solver workspace
+pub struct TinySolver<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize, F> {
+    pub settings: TinySettings<F>,
+    pub cache: TinyCache<Nx,Nu,F>,
+    pub work: TinyWorkspace<Nx,Nu,Hx,Hu,F>,
 }
 
 #[derive(Debug)]
@@ -46,59 +46,53 @@ pub struct TinyCache<const Nx: usize, const Nu: usize, F> {
 }
 
 #[derive(Debug)]
-pub struct TinyWorkspace<const Nx: usize, const Nu: usize, const Nh: usize, F> {
+pub struct TinyWorkspace<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize, F> {
 
     // Linear state space model
     A: SMatrix<F,Nx,Nx>,
     B: SMatrix<F,Nx,Nu>,
 
     // State and inputs
-    x: SMatrix<F,Nx,Nh>,
-    u: SMatrix<F,Nu,Nh>,
+    x: SMatrix<F,Nx,Hx>,
+    u: SMatrix<F,Nu,Hu>,
 
     // State and input constraints (min,max)
-    x_bound: Option<(SMatrix<F,Nx,Nh>,SMatrix<F,Nx,Nh>)>,
-    u_bound: Option<(SMatrix<F,Nu,Nh>,SMatrix<F,Nu,Nh>)>,
+    x_bound: Option<(SMatrix<F,Nx,Hx>,SMatrix<F,Nx,Hx>)>,
+    u_bound: Option<(SMatrix<F,Nu,Hu>,SMatrix<F,Nu,Hu>)>,
 
     // Linear cost matrices
-    q: SMatrix<F,Nx,Nh>,
-    r: SMatrix<F,Nu,Nh>,
+    q: SMatrix<F,Nx,Hx>,
+    r: SMatrix<F,Nu,Hu>,
 
     // Linear state and input cost vector
     Q: SVector<F,Nx>,
     R: SVector<F,Nu>,
 
     // Riccati backward pass terms
-    p: SMatrix<F,Nx,Nh>,
-    d: SMatrix<F,Nu,Nh>,
+    p: SMatrix<F,Nx,Hx>,
+    d: SMatrix<F,Nu,Hu>,
 
     // Auxiliary variables
-    v: SMatrix<F,Nx,Nh>,
-    vnew: SMatrix<F,Nx,Nh>,
-    z: SMatrix<F,Nu,Nh>,
-    znew: SMatrix<F,Nu,Nh>,
+    v: SMatrix<F,Nx,Hx>,
+    vnew: SMatrix<F,Nx,Hx>,
+    z: SMatrix<F,Nu,Hu>,
+    znew: SMatrix<F,Nu,Hu>,
 
     // Dual variables
-    g: SMatrix<F,Nx,Nh>,
-    y: SMatrix<F,Nu,Nh>,
+    g: SMatrix<F,Nx,Hx>,
+    y: SMatrix<F,Nu,Hu>,
 
     // Number of iterations for latest solve
     iter: usize,
 }
 
-impl <const Nx: usize, const Nu: usize, const Nh: usize, F> TinySolver<Nx,Nu,Nh,F>
+impl <const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize, F> TinySolver<Nx,Nu,Hx,Hu,F>
 where F: Scalar + SimdValue + RealField + Copy
 {
 
-    /// Creates a new [`TinySolver<Nx, Nu, Nz, Nh, F>`].
-    ///
-    /// ## Arguments
-    /// - `A`: State space propagation matrix
-    /// - `B`: State space input matrix
-    /// - `Q`: State penalty vector
-    /// - `R`: Input penalty vector
-    ///
-    /// Important note about `C`
+    // TODO: Add constraint to ensure Hu <= Hx
+    // This is not yet possible in stable Rust
+
     #[must_use]
     pub fn new(
         A: SMatrix<F,Nx,Nx>,
@@ -107,10 +101,13 @@ where F: Scalar + SimdValue + RealField + Copy
         R: SVector<F, Nu>,
         rho : F
     ) -> Option<Self> {
-        // Many things need to be passed into here
-
         let Qaug = Q.add_scalar(rho);
         let Raug = R.add_scalar(rho);
+
+        // Guard against incorrect horiozon lengths
+        if Hx <= Hu {
+            return None
+        }
 
         let (K, P) = lqr(&A, &B, &Qaug, &Raug, 1000)?;
 
@@ -152,21 +149,11 @@ where F: Scalar + SimdValue + RealField + Copy
         })
     }
 
-    /// # Solve for the optimal MPC solution
-    /// 
-    /// This function contains the iterative solver which approximates the minimizing control input `u`.
-    /// 
-    /// Pass the initial condition state `x` , which may be determined using eg. a Kalman filter or observer.
-    /// 
-    /// The function returns;
-    /// - the reason for termination, either being convergence or maximum number of iterations
-    /// - the optimal actuation `u` to apply to the system 
-    ///
     pub fn tiny_solve(
-        &mut self, 
-        x: SVector<F,Nx>, 
-        xref: &SMatrix<F,Nx,Nh>,
-        uref: &SMatrix<F,Nu,Nh>,
+        &mut self,
+        x: SVector<F,Nx>,
+        xref: &SMatrix<F,Nx,Hx>,
+        uref: &SMatrix<F,Nu,Hu>,
     ) -> (TerminationReason, SVector<F,Nu>) {
         let mut termination_reason = TerminationReason::MaxIters;
 
@@ -203,95 +190,100 @@ where F: Scalar + SimdValue + RealField + Copy
 
     /// Use LQR feedback policy to roll out trajectory
     fn forward_pass(&mut self, x: SVector<F,Nx>) {
-
         // Forward-pass with initial state
         self.work.u.set_column(0, &(-self.cache.Klqr * x - self.work.d.column(0)));
         self.work.x.set_column(0, &(self.work.A * x + self.work.B * self.work.u.column(0)));
 
-        // Forward-pass for rest of horizon
-        for i in 1..Nh {
+        // Roll out trajectory up to the control horizon Hu
+        for i in 1..Hu {
             self.work.u.set_column(i, &(-self.cache.Klqr * self.work.x.column(i-1) - self.work.d.column(i)));
             self.work.x.set_column(i, &(self.work.A * self.work.x.column(i-1) + self.work.B * self.work.u.column(i)));
         }
+
+        // For the rest of the prediction horizon (Hx), hold the last control input constant
+        if Hu < Hx {
+            let u_final = self.work.u.column(Hu - 1).clone_owned();
+            for i in Hu..Hx {
+                self.work.x.set_column(i, &(self.work.A * self.work.x.column(i-1) + self.work.B * u_final));
+            }
+        }
     }
 
-    /// Project slack (auxiliary) variables into their feasible domain, defined by projection functions related to each constraint
+    /// Project slack (auxiliary) variables into their feasible domain
     fn update_slack(&mut self) {
-
         self.work.znew = self.work.y + self.work.u;
         self.work.vnew = self.work.g + self.work.x;
 
-        // Box constraints on input
-        if let Some((u_min,u_max)) = self.work.u_bound {
-            self.work.znew.zip_zip_apply(&u_min,&u_max, |u,min, max|{ *u = (*u).clamp(min, max) });
+        if let Some((u_min,u_max)) = &self.work.u_bound {
+            self.work.znew.zip_zip_apply(u_min, u_max, |u, min, max| *u = u.clamp(min, max));
         }
 
-        // Box constraints on state
-        if let Some((x_min,x_max)) = self.work.x_bound {
-            self.work.vnew.zip_zip_apply(&x_min,&x_max, |x,min, max|{ *x = (*x).clamp(min, max) });
+        if let Some((x_min,x_max)) = &self.work.x_bound {
+            self.work.vnew.zip_zip_apply(x_min, x_max, |x, min, max| *x = x.clamp(min, max));
         }
     }
 
-    /// Update next iteration of dual variables by performing the augmented lagrangian multiplier update
+    /// Update next iteration of dual variables
     fn update_dual(&mut self) {
-        // Gadient ascent
         self.work.y += self.work.u - self.work.znew;
         self.work.g += self.work.x - self.work.vnew;
     }
 
-    /// Update linear control cost terms in the Riccati feedback using the changing slack and dual variables from ADMM
+    /// Update linear control cost terms
     fn update_linear_cost(
         &mut self,
-        xref: &SMatrix<F,Nx,Nh>, 
-        uref: &SMatrix<F,Nu,Nh>,
+        xref: &SMatrix<F,Nx,Hx>,
+        uref: &SMatrix<F,Nu,Hu>,
     ) {
-        // Input cost
+        // Input cost (up to Hu)
         uref.column_iter().enumerate().for_each(|(i,uref)| {
             self.work.r.set_column(i, &(-uref.component_mul(&self.work.R)))
         });
         self.work.r += (self.work.y - self.work.znew).scale(self.settings.rho);
 
-        // State cost
+        // State cost (up to Hx)
         xref.column_iter().enumerate().for_each(|(i,xref)| {
             self.work.q.set_column(i, &(-xref.component_mul(&self.work.Q)))
         });
         self.work.q += (self.work.g - self.work.vnew).scale(self.settings.rho);
 
-        // Terminal condition
-        let q_f = -self.cache.Plqr * xref.column(Nh - 1);
-        let admm_term_f = (self.work.g.column(Nh - 1) - self.work.vnew.column(Nh - 1)).scale(self.settings.rho);
-        self.work.p.set_column(Nh - 1, &(q_f + admm_term_f));
+        // Terminal condition at the end of the prediction horizon Hx
+        let q_f = -self.cache.Plqr * xref.column(Hx - 1);
+        let admm_term_f = (self.work.g.column(Hx - 1) - self.work.vnew.column(Hx - 1)).scale(self.settings.rho);
+        self.work.p.set_column(Hx - 1, &(q_f + admm_term_f));
     }
 
     /// Update linear terms from Riccati backward pass
     fn backward_pass_grad(&mut self) {
-        for i in (0..Nh-1).rev() {
+        // The backward pass integrates cost-to-go over the full prediction horizon Hx
+        for i in (0..Hx-1).rev() {
             let p_next = self.work.p.column(i + 1);
-            let r_curr = self.work.r.column(i);
-            
-            let d_val = self.cache.RpBPBi * (self.work.B.transpose() * p_next + r_curr);
-            self.work.d.set_column(i, &d_val);
-            
-            let p_val = self.work.q.column(i) + self.cache.AmBKt * p_next - self.cache.Klqr.transpose() * r_curr;
-            self.work.p.set_column(i, &p_val);
+
+            // Control action is only optimized up to Hu
+            if i < Hu {
+                let r_curr = self.work.r.column(i);
+                let d_val = self.cache.RpBPBi * (self.work.B.transpose() * p_next + r_curr);
+                self.work.d.set_column(i, &d_val);
+                let p_val = self.work.q.column(i) + self.cache.AmBKt * p_next - self.cache.Klqr.transpose() * r_curr;
+                self.work.p.set_column(i, &p_val);
+            } else {
+                // Beyond Hu, there is no control input cost 'r' and no feedforward 'd'
+                let p_val = self.work.q.column(i) + self.cache.AmBKt * p_next;
+                self.work.p.set_column(i, &p_val);
+            }
         }
     }
 
-    /// Check for termination condition by evaluating whether the largest absolute primal and dual residuals for states and inputs are below threhold.
+    /// Check for termination condition by evaluating residuals
     fn check_termination(&mut self, current_iter: usize) -> bool {
-
         let mut do_terminate = false;
 
-        if self.work.iter <= self.settings.check_termination + 1 || current_iter % self.settings.check_termination == 0 {
-
-            // Calculate residuals on slack variables
+        if current_iter > 0 && current_iter % self.settings.check_termination == 0 {
             let prim_residual_state = (self.work.x - self.work.vnew).abs().max();
             let dual_residual_state = (self.work.v - self.work.vnew).abs().max() * self.settings.rho;
             let prim_residual_input = (self.work.u - self.work.znew).abs().max();
             let dual_residual_input = (self.work.z - self.work.znew).abs().max() * self.settings.rho;
 
-
-            // If all residuals are below tolerance, we terminate
             do_terminate =
                 prim_residual_state < self.settings.prim_tol &&
                 prim_residual_input < self.settings.prim_tol &&
@@ -299,7 +291,6 @@ where F: Scalar + SimdValue + RealField + Copy
                 dual_residual_input < self.settings.dual_tol;
         }
 
-        // Save previous slack variables
         self.work.v = self.work.vnew;
         self.work.z = self.work.znew;
 
@@ -308,24 +299,22 @@ where F: Scalar + SimdValue + RealField + Copy
 
 
     /// Set or un-set varying min-max bounds on inputs for entire horizon
-    pub fn set_u_bounds(&mut self, u_bound: Option<(SMatrix<F,Nu,Nh>,SMatrix<F,Nu,Nh>)>) {
+    pub fn set_u_bounds(&mut self, u_bound: Option<(SMatrix<F,Nu,Hu>,SMatrix<F,Nu,Hu>)>) {
         self.work.u_bound = u_bound;
     }
 
     /// Set or un-set varying min-max bounds on states for entire horizon
-    pub fn set_x_bounds(&mut self, x_bound: Option<(SMatrix<F,Nx,Nh>,SMatrix<F,Nx,Nh>)>) {
+    pub fn set_x_bounds(&mut self, x_bound: Option<(SMatrix<F,Nx,Hx>,SMatrix<F,Nx,Hx>)>) {
         self.work.x_bound = x_bound;
     }
 
     /// Set or un-set the constant min-max bounds on inputs for entire horizon
     pub fn set_const_u_bounds(&mut self, u_bound: Option<(SVector<F,Nu>,SVector<F,Nu>)>) {
-
         if let Some((vec_min,vec_max)) = u_bound {
-
-            let mut min: SMatrix<F,Nu,Nh> = SMatrix::zeros();
-            let mut max: SMatrix<F,Nu,Nh> = SMatrix::zeros();
+            let mut min: SMatrix<F,Nu,Hu> = SMatrix::zeros();
+            let mut max: SMatrix<F,Nu,Hu> = SMatrix::zeros();
             
-            for i in 0..Nh {
+            for i in 0..Hu {
                 min.set_column(i, &vec_min);
                 max.set_column(i, &vec_max);
             }
@@ -333,17 +322,15 @@ where F: Scalar + SimdValue + RealField + Copy
         } else {
             self.work.u_bound = None
         }
-    } 
+    }
 
     /// Set or un-set the constant min-max bounds on states for entire horizon
     pub fn set_const_x_bounds(&mut self, x_bound: Option<(SVector<F,Nx>,SVector<F,Nx>)>) {
-
         if let Some((vec_min,vec_max)) = x_bound {
-
-            let mut min: SMatrix<F,Nx,Nh> = SMatrix::zeros();
-            let mut max: SMatrix<F,Nx,Nh> = SMatrix::zeros();
+            let mut min: SMatrix<F,Nx,Hx> = SMatrix::zeros();
+            let mut max: SMatrix<F,Nx,Hx> = SMatrix::zeros();
             
-            for i in 0..Nh {
+            for i in 0..Hx {
                 min.set_column(i, &vec_min);
                 max.set_column(i, &vec_max);
             }
@@ -351,7 +338,7 @@ where F: Scalar + SimdValue + RealField + Copy
         } else {
             self.work.x_bound = None
         }
-    } 
+    }
 
     pub fn reset_dual_variables(&mut self)  {
         self.work.y = SMatrix::zeros();
@@ -362,12 +349,12 @@ where F: Scalar + SimdValue + RealField + Copy
         self.work.iter
     }
 
-    /// Get the system state `x` for the time `o`
+    /// Get the system state `x` for the time `i`
     pub fn get_x_at(&self,i: usize) -> SVector<F,Nx> {
         self.work.x.column(i).into()
     }
 
-    /// Get the system input `u` for the time `o`
+    /// Get the system input `u` for the time `i`
     pub fn get_u_at(&self,i: usize) -> SVector<F,Nu> {
         self.work.u.column(i).into()
     }
@@ -378,21 +365,22 @@ where F: Scalar + SimdValue + RealField + Copy
     }
     
     /// Get reference to matrix containing state predictions
-    pub fn get_x_matrix(&self) -> &SMatrix<F,Nx,Nh> {
+    pub fn get_x_matrix(&self) -> &SMatrix<F,Nx,Hx> {
         &self.work.x
     }
 
     /// Get reference to matrix containing input predictions
-    pub fn get_u_matrix(&self) -> &SMatrix<F,Nu,Nh> {
+    pub fn get_u_matrix(&self) -> &SMatrix<F,Nu,Hu> {
         &self.work.u
     }
     
-    pub fn horizon_length(&self)    -> usize { Nh }
-    pub fn num_states(&self)        -> usize { Nx }
-    pub fn num_inputs(&self)        -> usize { Nu }
+    pub fn prediction_horizon_length(&self) -> usize { Hx }
+    pub fn control_horizon_length(&self)  -> usize { Hu }
+    pub fn num_states(&self) -> usize { Nx }
+    pub fn num_inputs(&self) -> usize { Nu }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TerminationReason {
     Converged,
     MaxIters
@@ -413,7 +401,6 @@ pub fn lqr<T: RealField + Copy, const Nx: usize, const Nu: usize>(
         P = A.transpose()*P*A - A.transpose()*P*B*K + SMatrix::from_diagonal(&Qaug);
     }
 
-    // Ensure none of the entries are NaN or infinite
     if !K.iter().all(|x| x.is_finite()) || !P.iter().all(|x| x.is_finite()) {
         return None;
     }

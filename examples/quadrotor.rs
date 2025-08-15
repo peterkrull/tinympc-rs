@@ -8,11 +8,12 @@ use tinympc_rs::TinySolver;
 
 */
 
-const NH:usize = 100;
+const HX: usize = 100;
+const HU: usize = 90;
 
 fn main() {
 
-    let mut mpc = TinySolver::<12, 4, NH, f64>::new(A, B, Q, R, RHO).unwrap();
+    let mut mpc = TinySolver::<12, 4, HX, HU, f64>::new(A, B, Q, R, RHO).unwrap();
 
     // Configure settings
     mpc.settings.check_termination = 5;
@@ -29,9 +30,9 @@ fn main() {
 
     // Constant reference through entire horizon
     let reference = vector![0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    let mut xref = SMatrix::<f64,12,NH>::zeros();
+    let mut xref = SMatrix::<f64,12,HX>::zeros();
 
-    for i in 0..mpc.horizon_length() {
+    for i in 0..mpc.prediction_horizon_length() {
         xref.set_column(i, &reference);
     }
 
