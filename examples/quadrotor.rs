@@ -1,5 +1,5 @@
 use nalgebra::{vector, matrix, SMatrix, SVector};
-use tinympc_rs::TinySolver;
+use tinympc_rs::TinyMpc;
 
 /*
 
@@ -9,20 +9,19 @@ use tinympc_rs::TinySolver;
 */
 
 const HX: usize = 100;
-const HU: usize = 90;
+const HU: usize = 80;
 
 fn main() {
 
-    let mut mpc = TinySolver::<12, 4, HX, HU, f64>::new(A, B, Q, R, RHO).unwrap();
+    let mut mpc = TinyMpc::<12, 4, HX, HU, f64>::new(A, B, Q, R, RHO).unwrap();
 
     // Configure settings
-    mpc.settings.check_termination = 5;
-    mpc.settings.max_iter = 100;
-    mpc.settings.rho = 5.0;
+    mpc.config.check_termination = 1;
+    mpc.config.max_iter = 2000;
 
     // Tolerance for primal and dual slack variable residuals
-    mpc.settings.prim_tol = 1e-3;
-    mpc.settings.dual_tol = 1e-3;
+    mpc.config.prim_tol = 1e-3;
+    mpc.config.dual_tol = 1e-3;
 
     // Set constraints in input and state
     mpc.set_const_u_bounds(Some((SMatrix::from_element(-0.5),SMatrix::from_element(0.5))));
@@ -43,7 +42,7 @@ fn main() {
     for k in 0..500 {
 
         // Run solvers
-        let (reason,u) = mpc.tiny_solve(x, &xref, &SMatrix::zeros());
+        let (reason,u) = mpc.solve(x, &xref, &SMatrix::zeros());
         println!("At step {k:3} in {:4} iterations, got tracking error : {:05.4} - {:?} with u:{:?}",mpc.get_num_iters(),(x-reference).norm(),reason,u);
 
         // Iterate simulation
