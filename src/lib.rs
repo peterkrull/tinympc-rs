@@ -1,4 +1,4 @@
-#![no_std]
+// #![no_std]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -8,7 +8,27 @@
 
 */
 
-use nalgebra::{convert, RealField, SMatrix, SVector, Scalar, SimdValue};
+use nalgebra::{convert, RealField, SMatrix, SVector, Scalar};
+
+use crate::constraint::DynConstraint;
+
+pub mod constraint;
+
+/// Errors that can occur during system setup
+#[derive(Debug, PartialEq)]
+pub enum Error {
+    InvalidHorizonLengths,
+    QNotPositiveSemidefinite,
+    RNotPositiveDefinite,
+    RpBPBNotInvertible,
+    NonFiniteValues,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum TerminationReason {
+    Converged,
+    MaxIters,
+}
 
 #[derive(Debug)]
 pub struct TinyMpc<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize, F> {
@@ -50,25 +70,9 @@ pub struct Cache<const Nx: usize, const Nu: usize, F> {
     pub AmBKt: SMatrix<F, Nx, Nx>,
 }
 
-/// Errors that can occur during system setup
-#[derive(Debug, PartialEq)]
-pub enum Error {
-    InvalidHorizonLengths,
-    QNotPositiveSemidefinite,
-    RNotPositiveDefinite,
-    RpBPBNotInvertible,
-    NonFiniteValues,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum TerminationReason {
-    Converged,
-    MaxIters,
-}
-
 impl<const Nx: usize, const Nu: usize, T> Cache<Nx, Nu, T>
 where
-    T: Scalar + SimdValue + RealField + Copy,
+    T: Scalar + RealField + Copy,
 {
     fn compute(
         rho: T,
@@ -78,6 +82,7 @@ where
         Q: &SVector<T, Nx>,
         R: &SVector<T, Nu>,
     ) -> Result<Self, Error> {
+
         if !Q.iter().all(|q| q >= &T::zero()) {
             return Err(Error::QNotPositiveSemidefinite);
         }
@@ -122,38 +127,68 @@ where
 }
 
 #[derive(Debug)]
+pub struct AdaptiveCache<const Nx: usize, const Nu: usize, const NumRho: usize, F> {
+    pub caches: [Cache<Nx, Nu, F>; NumRho]
+}
+
+impl<const Nx: usize, const Nu: usize, const NumRho: usize, T> AdaptiveCache<Nx, Nu, NumRho, T>
+where
+    T: Scalar + RealField + Copy,
+{
+    pub fn compute(
+        base_rho: T,
+        iters: usize,
+        A: &SMatrix<T, Nx, Nx>,
+        B: &SMatrix<T, Nx, Nu>,
+        Q: &SVector<T, Nx>,
+        R: &SVector<T, Nu>,
+    ) -> Result<Self, Error> {
+
+        let mut initializing = [const {None}; NumRho];
+
+        let base_index = NumRho / 2;
+
+        for index in 0..NumRho {
+            let power = index as isize - base_index as isize;
+            
+            // For powers of 2, we can use bit shifting (1 << n) which is 2^n
+            let factor = convert((1 << power.abs()) as f64);
+            let rho = if power.is_positive() {
+                base_rho * factor
+            } else if power.is_negative() {
+                base_rho / factor
+            } else {
+                base_rho
+            };
+
+            let cache = Cache::compute(rho, iters, A, B, Q, R)?;
+            initializing[index] = Some(cache)
+        }
+
+        // This will always succeed since Cache::compute short circuits above.
+        let caches = initializing.map(|x|x.unwrap());
+
+        Ok(AdaptiveCache{ caches})
+    }
+}
+
+#[derive(Debug)]
 pub struct State<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize, F> {
     // Linear state space model
     A: SMatrix<F, Nx, Nx>,
     B: SMatrix<F, Nx, Nu>,
 
-    // State and inputs
+    // State and input predictions
     x: SMatrix<F, Nx, Hx>,
     u: SMatrix<F, Nu, Hu>,
-
-    // State and input constraints (min,max)
-    x_bound: Option<(SMatrix<F, Nx, Hx>, SMatrix<F, Nx, Hx>)>,
-    u_bound: Option<(SMatrix<F, Nu, Hu>, SMatrix<F, Nu, Hu>)>,
 
     // Linear cost matrices
     x_cost: SMatrix<F, Nx, Hx>,
     u_cost: SMatrix<F, Nu, Hu>,
 
-    // Linear state and input cost vector
-    Q: SVector<F, Nx>,
-    R: SVector<F, Nu>,
-
     // Riccati backward pass terms
     x_ricc: SMatrix<F, Nx, Hx>,
     u_ricc: SMatrix<F, Nu, Hu>,
-
-    // Auxiliary variables
-    x_slac: SMatrix<F, Nx, Hx>,
-    u_slac: SMatrix<F, Nu, Hu>,
-
-    // Dual variables
-    x_dual: SMatrix<F, Nx, Hx>,
-    u_dual: SMatrix<F, Nu, Hu>,
 
     // Number of iterations for latest solve
     iter: usize,
@@ -162,7 +197,7 @@ pub struct State<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: us
 impl<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize, F>
     TinyMpc<Nx, Nu, Hx, Hu, F>
 where
-    F: Scalar + SimdValue + RealField + Copy,
+    F: Scalar + RealField + Copy,
 {
     #[must_use]
     pub fn new(
@@ -173,7 +208,7 @@ where
         rho: F,
     ) -> Result<Self, Error> {
         // Guard against invalid horizon lengths
-        if Hx <= Hu || Hu == 0 {
+        if Hx < Hu || Hu == 0 {
             return Err(Error::InvalidHorizonLengths);
         }
 
@@ -181,27 +216,19 @@ where
             config: Config {
                 prim_tol: convert(1e-3),
                 dual_tol: convert(1e-3),
-                max_iter: 100,
-                do_check: 10,
+                max_iter: 20,
+                do_check: 5,
             },
-            cache: Cache::compute(rho, 1000, &A, &B, &Q, &R)?,
+            cache: Cache::compute(rho, Hx, &A, &B, &Q, &R)?,
             state: State {
                 A,
                 B,
-                Q,
-                R,
                 x: SMatrix::zeros(),
                 u: SMatrix::zeros(),
                 x_cost: SMatrix::zeros(),
                 u_cost: SMatrix::zeros(),
                 x_ricc: SMatrix::zeros(),
                 u_ricc: SMatrix::zeros(),
-                x_slac: SMatrix::zeros(),
-                u_slac: SMatrix::zeros(),
-                x_dual: SMatrix::zeros(),
-                u_dual: SMatrix::zeros(),
-                u_bound: None,
-                x_bound: None,
                 iter: 0,
             },
         })
@@ -210,24 +237,22 @@ where
     pub fn solve(
         &mut self,
         xnow: SVector<F, Nx>,
-        xref: &SMatrix<F, Nx, Hx>,
-        uref: &SMatrix<F, Nu, Hu>,
+        xref: Option<&SMatrix<F, Nx, Hx>>,
+        uref: Option<&SMatrix<F, Nu, Hu>>,
+        mut xcon: Option<&mut [&mut DynConstraint<F, Nx, Hx>]>,
+        mut ucon: Option<&mut [&mut DynConstraint<F, Nu, Hu>]>,
     ) -> (TerminationReason, SVector<F, Nu>) {
         let mut termination_reason = TerminationReason::MaxIters;
 
         // Better warm-starting of dual variables from prior solution
-        self.shift_dual_variables();
+        self.shift_constraint_variables(&mut xcon, &mut ucon);
 
         // Iteratively solve MPC problem
         self.state.iter = 0;
         while self.state.iter < self.config.max_iter {
-            self.state.iter += 1;
-
-            let x_slac_old = self.state.x_slac.clone_owned();
-            let u_slac_old = self.state.u_slac.clone_owned();
 
             // Update linear control cost terms
-            self.update_cost(xref, uref);
+            self.update_cost(xref, uref, &xcon, &ucon);
 
             // Backward pass to update Ricatti variables
             self.backward_pass();
@@ -236,67 +261,105 @@ where
             self.forward_pass(xnow);
 
             // Project into feasible domain
-            self.update_constraints();
+            self.update_constraints(&mut xcon, &mut ucon);
 
             // Check for early-stop condition
-            if self.check_termination(x_slac_old, u_slac_old) {
+            if self.check_termination(&xcon, &ucon) {
+                self.state.iter += 1; 
                 termination_reason = TerminationReason::Converged;
                 break;
             }
+
+            self.state.iter += 1;
         }
 
         (termination_reason, self.get_u())
     }
 
     /// Shift the dual variables by one time step for more accurate hot starting
-    fn shift_dual_variables(&mut self) {
-        /// This method uses unsafe to memmove the columns, effectively shifting all columns over
-        fn shift_left<F, const ROWS: usize, const COLS: usize>(
-            matrix: &mut SMatrix<F, ROWS, COLS>,
-        ) {
-            if COLS > 1 {
-                let element_count = ROWS * (COLS - 1);
-                let ptr = matrix.as_mut_slice().as_mut_ptr();
-
-                unsafe {
-                    core::ptr::copy(ptr.add(ROWS), ptr, element_count);
-                }
+    fn shift_constraint_variables(&mut self,
+        xcon: &mut Option<&mut [&mut DynConstraint<F, Nx, Hx>]>,
+        ucon: &mut Option<&mut [&mut DynConstraint<F, Nu, Hu>]>,
+    ) {
+        if let Some(cons) = xcon.as_mut() {
+            for con in cons.iter_mut() {
+                con.time_shift_variables();
             }
         }
 
-        shift_left(&mut self.state.u_dual);
-        shift_left(&mut self.state.x_dual);
+        if let Some(cons) = ucon.as_mut() {
+            for con in cons.iter_mut() {
+                con.time_shift_variables();
+            }
+        }
     }
 
     /// Update linear control cost terms
-    fn update_cost(&mut self, xref: &SMatrix<F, Nx, Hx>, uref: &SMatrix<F, Nu, Hu>) {
-        // Input cost (up to Hu)
-        uref.column_iter().enumerate().for_each(|(i, uref)| {
-            self.state
-                .u_cost
-                .set_column(i, &(-uref.component_mul(&self.state.R)))
-        });
-        self.state.u_cost += (self.state.u_dual - self.state.u_slac).scale(self.cache.rho);
+    fn update_cost(&mut self, 
+        xref: Option<&SMatrix<F, Nx, Hx>>,
+        uref: Option<&SMatrix<F, Nu, Hu>>,
+        xcon: &Option<&mut [&mut DynConstraint<F, Nx, Hx>]>,
+        ucon: &Option<&mut [&mut DynConstraint<F, Nu, Hu>]>,
+    ) {
+        let s = &mut self.state;
+        let c = &self.cache;
 
-        // State cost (up to Hx)
-        xref.column_iter().enumerate().for_each(|(i, xref)| {
-            self.state
-                .x_cost
-                .set_column(i, &(-xref.component_mul(&self.state.Q)))
-        });
-        self.state.x_cost += (self.state.x_dual - self.state.x_slac).scale(self.cache.rho);
+        s.x_cost = SMatrix::<F, Nx, Hx>::zeros();
+        s.u_cost = SMatrix::<F, Nu, Hu>::zeros();
 
-        // Terminal condition at the end of the prediction horizon Hx
-        let q_f = -self.cache.Plqr * xref.column(Hx - 1);
-        let admm_term_f = (self.state.x_dual.column(Hx - 1) - self.state.x_slac.column(Hx - 1))
-            .scale(self.cache.rho);
-        self.state.x_ricc.set_column(Hx - 1, &(q_f + admm_term_f));
+        // Add cost contribution for state constraint violations
+        if let Some(cons) = xcon {
+            for con in cons.iter() {
+                con.add_cost(&mut s.x_cost);
+            }
+            s.x_cost.scale_mut(c.rho);
+        }
+        
+        // Add cost contribution for input constraint violations
+        if let Some(cons) = ucon {
+            for con in cons.iter() {
+                con.add_cost(&mut s.u_cost);
+            }
+            s.u_cost.scale_mut(c.rho);
+        }
+
+        // Extract ADMM cost term for Riccati terminal condition
+        s.x_ricc.set_column(Hx - 1, &s.x_cost.column(Hx - 1));
+
+        // Add tracking cost for stages
+        if let Some(xref) = xref {
+            for i in 0..Hx {
+                let mut x_cost_col = s.x_cost.column_mut(i);
+                x_cost_col -= xref.column(i).component_mul(&c.Q_aug);
+            }
+        }
+        if let Some(uref) = uref {
+        for i in 0..Hu {
+                let mut u_cost_col = s.u_cost.column_mut(i);
+                u_cost_col -= uref.column(i).component_mul(&c.R_aug);
+            }
+        }
+
+        // Add the terminal tracking penalty, which uses Plqr
+        if let Some(xref) = xref {
+            let mut x_ricc_terminal = s.x_ricc.column_mut(Hx - 1);
+            x_ricc_terminal -= c.Plqr * xref.column(Hx - 1);
+        }
     }
 
     /// Update linear terms from Riccati backward pass
     fn backward_pass(&mut self) {
         let s = &mut self.state;
         let c = &self.cache;
+
+        // Handles this special case correctly.
+        // This will be optimized away in the case they are different.
+        if Hu == Hx {
+            let i = Hu - 1;
+            let x_ricc_next = s.x_ricc.column(i);
+            let r_curr = s.u_cost.column(i);
+            s.u_ricc.set_column(i, &(c.RpBPBi * (s.B.transpose() * x_ricc_next + r_curr)));
+        }
 
         // The backward pass integrates cost-to-go over the full prediction horizon Hx
         for i in (0..Hx - 1).rev() {
@@ -337,94 +400,62 @@ where
     }
 
     /// Project slack variables into their feasible domain and update dual variables
-    fn update_constraints(&mut self) {
-        self.state.u_slac = self.state.u_dual + self.state.u;
-        self.state.x_slac = self.state.x_dual + self.state.x;
+    fn update_constraints(&mut self,
+        xcon: &mut Option<&mut [&mut DynConstraint<F, Nx, Hx>]>,
+        ucon: &mut Option<&mut [&mut DynConstraint<F, Nu, Hu>]>,
+    ) {
+        let s = &mut self.state;
 
-        if let Some((u_min, u_max)) = &self.state.u_bound {
-            self.state
-                .u_slac
-                .zip_zip_apply(u_min, u_max, |u, min, max| *u = u.clamp(min, max));
+        if let Some(cons) = xcon.as_mut() {
+            for con in cons.iter_mut() {
+                con.constrain(&s.x);
+            }
         }
 
-        if let Some((x_min, x_max)) = &self.state.x_bound {
-            self.state
-                .x_slac
-                .zip_zip_apply(x_min, x_max, |x, min, max| *x = x.clamp(min, max));
+        if let Some(cons) = ucon.as_mut() {
+            for con in cons.iter_mut() {
+                con.constrain(&s.u);
+            }
         }
-
-        self.state.u_dual += self.state.u - self.state.u_slac;
-        self.state.x_dual += self.state.x - self.state.x_slac;
     }
 
     /// Check for termination condition by evaluating residuals
     fn check_termination(
         &mut self,
-        x_slac_old: SMatrix<F, Nx, Hx>,
-        u_slac_old: SMatrix<F, Nu, Hu>,
+        xcon: &Option<&mut [&mut DynConstraint<F, Nx, Hx>]>,
+        ucon: &Option<&mut [&mut DynConstraint<F, Nu, Hu>]>,
     ) -> bool {
+        let s = &mut self.state;
+        let c = &self.cache;
+        let cfg = &self.config;
 
-        if (self.state.iter - 1) % self.config.do_check != 0 {
+        if s.iter % cfg.do_check != 0 {
             return false
         }
 
-        let prim_residual_state = (self.state.x - self.state.x_slac).abs().max();
-        let dual_residual_state = (x_slac_old - self.state.x_slac).abs().max() * self.cache.rho;
-        let prim_residual_input = (self.state.u - self.state.u_slac).abs().max();
-        let dual_residual_input = (u_slac_old - self.state.u_slac).abs().max() * self.cache.rho;
+        let mut max_prim_residual = F::zero();
+        let mut max_dual_residual = F::zero();
 
-        return prim_residual_state < self.config.prim_tol
-            && prim_residual_input < self.config.prim_tol
-            && dual_residual_state < self.config.dual_tol
-            && dual_residual_input < self.config.dual_tol;
-
-    }
-
-    /// Set or un-set varying min-max bounds on inputs for entire horizon
-    pub fn set_u_bounds(&mut self, u_bound: Option<(SMatrix<F, Nu, Hu>, SMatrix<F, Nu, Hu>)>) {
-        self.state.u_bound = u_bound;
-    }
-
-    /// Set or un-set varying min-max bounds on states for entire horizon
-    pub fn set_x_bounds(&mut self, x_bound: Option<(SMatrix<F, Nx, Hx>, SMatrix<F, Nx, Hx>)>) {
-        self.state.x_bound = x_bound;
-    }
-
-    /// Set or un-set the constant min-max bounds on inputs for entire horizon
-    pub fn set_const_u_bounds(&mut self, u_bound: Option<(SVector<F, Nu>, SVector<F, Nu>)>) {
-        if let Some((vec_min, vec_max)) = u_bound {
-            let mut min: SMatrix<F, Nu, Hu> = SMatrix::zeros();
-            let mut max: SMatrix<F, Nu, Hu> = SMatrix::zeros();
-
-            for i in 0..Hu {
-                min.set_column(i, &vec_min);
-                max.set_column(i, &vec_max);
+        if let Some(cons) = xcon {
+            for con in cons.iter() {
+                max_prim_residual = max_prim_residual.max(con.max_prim_residual);
+                max_dual_residual = max_dual_residual.max(con.max_dual_residual);
             }
-            self.state.u_bound = Some((min, max));
-        } else {
-            self.state.u_bound = None
         }
-    }
 
-    /// Set or un-set the constant min-max bounds on states for entire horizon
-    pub fn set_const_x_bounds(&mut self, x_bound: Option<(SVector<F, Nx>, SVector<F, Nx>)>) {
-        if let Some((vec_min, vec_max)) = x_bound {
-            let mut min: SMatrix<F, Nx, Hx> = SMatrix::zeros();
-            let mut max: SMatrix<F, Nx, Hx> = SMatrix::zeros();
-
-            for i in 0..Hx {
-                min.set_column(i, &vec_min);
-                max.set_column(i, &vec_max);
+        if let Some(cons) = ucon {
+            for con in cons.iter() {
+                max_prim_residual = max_prim_residual.max(con.max_prim_residual);
+                max_dual_residual = max_dual_residual.max(con.max_dual_residual);
             }
-            self.state.x_bound = Some((min, max));
-        } else {
-            self.state.x_bound = None
         }
-    }
 
-    pub fn reset_dual_variables(&mut self) {
-        self.state.u_dual = SMatrix::zeros();
-        self.state.x_dual = SMatrix::zeros();
+        // TODO Do adaptive rho
+        // if max_prim_residual * convert(10.0) > max_dual_residual {
+        // } else if max_dual_residual * convert(10.0) > max_prim_residual {
+        // }
+
+        max_prim_residual < cfg.prim_tol && max_dual_residual * c.rho < cfg.dual_tol
     }
 
     pub fn get_num_iters(&self) -> usize {

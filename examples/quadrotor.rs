@@ -1,5 +1,5 @@
-use nalgebra::{matrix, vector, SMatrix, SVector};
-use tinympc_rs::TinyMpc;
+use nalgebra::{matrix, vector, SMatrix, SVector, SimdPartialOrd};
+use tinympc_rs::{constraint::{BoxFixed, DynConstraint}, AdaptiveCache, TinyMpc};
 
 /*
 
@@ -8,47 +8,64 @@ use tinympc_rs::TinyMpc;
 
 */
 
-const HX: usize = 100;
-const HU: usize = 75;
+type Float = f32;
+
+const HX: usize = 40;
+const HU: usize = 30;
 
 fn main() {
-    let mut mpc = TinyMpc::<12, 4, HX, HU, f64>::new(A, B, Q, R, RHO).unwrap();
+    let mut mpc = TinyMpc::<12, 4, HX, HU, Float>::new(A, B, Q, R, RHO).unwrap();
 
     // Configure settings
     mpc.config.do_check = 1;
-    mpc.config.max_iter = 25;
+    mpc.config.max_iter = 200;
 
-    // Tolerance for primal and dual slack variable residuals
-    mpc.config.prim_tol = 1e-3;
-    mpc.config.dual_tol = 1e-3;
+    let caches = AdaptiveCache::<_, _, 9, Float>::compute(2.0, 1000, &A, &B, &Q, &R).unwrap();
 
-    // Set constraints in input and state
-    mpc.set_const_u_bounds(Some((
-        SMatrix::from_element(-0.5),
-        SMatrix::from_element(0.5),
-    )));
-    mpc.set_const_x_bounds(Some((
-        SMatrix::from_element(-5.0),
-        SMatrix::from_element(5.0),
-    )));
+    for index in 0..8 {
+        let cache0 = &caches.caches[index];
+        println!("Cache {index}: {}", cache0.Klqr);
+    }
 
     // Constant reference through entire horizon
-    let mut xref = SMatrix::<f64, 12, HX>::zeros();
+    let mut xref = SMatrix::<Float, 12, HX>::zeros();
 
     // Dynamic state vector
     let mut x = vector![0.0, 1.0, 0.0, 0.2, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0];
 
+    let xcon_box1 = BoxFixed::new()
+            .with_lower(SVector::from_element(Some(-5.0)))
+            .with_upper(SVector::from_element(Some(5.0)));
+
+    let mut x_constraints = [
+        &mut DynConstraint::new(&xcon_box1)
+    ];
+
+    let ucon_box1 = BoxFixed::new()
+            .with_lower(SVector::from_element(Some(-0.2)))
+            .with_upper(SVector::from_element(Some(0.2)));
+
+    let mut u_constraints = [
+        &mut DynConstraint::new(&ucon_box1)
+    ];
+
     let mut total_iters = 0;
-    for k in 0..500 {
+    for k in 0..100 {
         // Run solvers
 
         for i in 0..mpc.prediction_horizon_length() {
             let mut reference = SVector::zeros();
-            reference[2] = ((i + k) as f64 / 10.0).sin();
+            reference[2] = ((i + k) as Float / 10.0).sin();
             xref.set_column(i, &reference);
         }
 
-        let (reason, u) = mpc.solve(x, &xref, &SMatrix::zeros());
+        let (reason, u) = mpc.solve(
+            x,
+            Some(&xref),
+            None,
+            Some(&mut x_constraints),
+            Some(&mut u_constraints),
+        );
         println!(
             "At step {k:3} in {:4} iterations, got tracking error : {:05.4} - {:?} with u:{:?}",
             mpc.get_num_iters(),
@@ -58,6 +75,7 @@ fn main() {
         );
 
         // Iterate simulation
+        let u = u.simd_clamp(SMatrix::from_element(-0.5), SMatrix::from_element(0.5));
         x = A * x + B * u;
 
         total_iters += mpc.get_num_iters();
@@ -66,14 +84,14 @@ fn main() {
     println!("Total iterations: {total_iters}");
 }
 
-pub static K: SMatrix<f64, 4, 12> = matrix![
+pub static K: SMatrix<Float, 4, 12> = matrix![
     -0.1131651, 0.0804349, 1.2891591, -0.3933755, -0.5924539, -2.5576673, -0.0885719, 0.0612491, 0.5438439, -0.0355682, -0.0570154, -0.5522377;
     0.1079494, 0.0311034, 1.2891591, -0.1027003, 0.5690238, 2.5574092, 0.0847269, 0.0206449, 0.5438439, -0.0049179, 0.0550856, 0.5519773;
     0.0028796, -0.0363306, 1.2891591, 0.1261700, -0.0756569, -2.5561006, -0.0033242, -0.0244975, 0.5438439, 0.0068503, -0.0147863, -0.5512313;
     0.0023362, -0.0752077, 1.2891591, 0.3699059, 0.0990870, 2.5563587, 0.0071693, -0.0573965, 0.5438439, 0.0336359, 0.0167160, 0.5514916
 ];
 
-pub static P: SMatrix<f64, 12, 12> = matrix![
+pub static P: SMatrix<Float, 12, 12> = matrix![
     1542.3620564, -0.2580837, -0.0000000, 1.1105663, 1299.4507594, 17.2503454, 437.8595030, -0.1904147, -0.0000000, 0.0771823, 14.7132685, 2.6899147;
     -0.2580837, 1541.8513994, -0.0000000, -1297.2441085, -1.1105778, -6.8996289, -0.1904156, 437.4818451, 0.0000000, -14.5599331, -0.0771835, -1.0758960;
     -0.0000000, -0.0000000, 885.9046714, 0.0000000, -0.0000000, -0.0000000, -0.0000000, -0.0000000, 74.7159753, -0.0000000, -0.0000000, -0.0000000;
@@ -88,7 +106,7 @@ pub static P: SMatrix<f64, 12, 12> = matrix![
     2.6899147, -1.0758960, -0.0000000, 6.4604041, 16.1514679, 153.1645212, 2.2347043, -0.8938386, -0.0000000, 0.6846635, 1.7116687, 35.6329664
 ];
 
-pub static A: SMatrix<f64, 12, 12> = matrix![
+pub static A: SMatrix<Float, 12, 12> = matrix![
     1.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0245250, 0.0000000, 0.0500000, 0.0000000, 0.0000000, 0.0000000, 0.0002044, 0.0000000;
     0.0000000, 1.0000000, 0.0000000, -0.0245250, 0.0000000, 0.0000000, 0.0000000, 0.0500000, 0.0000000, -0.0002044, 0.0000000, 0.0000000;
     0.0000000, 0.0000000, 1.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0500000, 0.0000000, 0.0000000, 0.0000000;
@@ -103,7 +121,7 @@ pub static A: SMatrix<f64, 12, 12> = matrix![
     0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 1.0000000
 ];
 
-pub static B: SMatrix<f64, 12, 4> = matrix![
+pub static B: SMatrix<Float, 12, 4> = matrix![
     -0.0007069, 0.0007773, 0.0007091, -0.0007795;
     0.0007034, 0.0007747, -0.0007042, -0.0007739;
     0.0052554, 0.0052554, 0.0052554, 0.0052554;
@@ -118,8 +136,8 @@ pub static B: SMatrix<f64, 12, 4> = matrix![
     0.9873856, -0.3611820, -1.3921880, 0.7659845
 ];
 
-pub static Q: SVector<f64, 12> = vector! {100.0000000, 100.0000000, 100.0000000, 4.0000000, 4.0000000, 400.0000000, 4.0000000, 4.0000000, 4.0000000, 2.0408163, 2.0408163, 4.0000000};
+pub static Q: SVector<Float, 12> = vector! {100.0000000, 100.0000000, 100.0000000, 4.0000000, 4.0000000, 400.0000000, 4.0000000, 4.0000000, 4.0000000, 2.0408163, 2.0408163, 4.0000000};
 
-pub static R: SVector<f64, 4> = vector! {4.0000000, 4.0000000, 4.0000000, 4.0000000};
+pub static R: SVector<Float, 4> = vector! {4.0000000, 4.0000000, 4.0000000, 4.0000000};
 
-pub static RHO: f64 = 1.0;
+pub static RHO: Float = 8.0;
