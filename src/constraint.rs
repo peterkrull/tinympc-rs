@@ -11,6 +11,30 @@ impl <T, const N: usize, const H: usize> Project<T, N, H> for &dyn Project<T, N,
     }
 }
 
+impl <P: Project<T, N, H>, T, const N: usize, const H: usize> Project<T, N, H> for &P  {
+    fn project(&self, points: &mut SMatrix<T, N, H>) {
+        (**self).project(points);
+    }
+}
+
+impl <'a, P: Project<T, N, H>, T: RealField + Copy, const N: usize, const H: usize> From<&'a P> for Constraint<T, &'a dyn Project<T, N, H>, N, H> {
+    fn from(value: &'a P) -> Self {
+        Constraint::new(value as &dyn Project<T, N, H>)
+    }
+}
+
+pub trait ProjectExt<T: RealField + Copy, const N: usize, const H: usize>: Project<T, N, H> + Sized {
+    fn into_constraint(&self) -> Constraint<T, &Self, N, H> {
+        Constraint::new(self)
+    }
+
+    fn into_dyn_constraint(&self) -> DynConstraint<'_, T, N, H> {
+        Constraint::new(self as &dyn Project<T, N, H>)
+    }
+}
+
+impl <S: Project<T, N, H>, T: RealField + Copy, const N: usize, const H: usize> ProjectExt<T, N, H> for S {}
+
 /// Simple box constraint that is constant throughout the horizon.
 pub struct BoxFixed<T, const N: usize> {
     pub lower: SVector<Option<T>, N>,
@@ -113,8 +137,8 @@ impl <T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>> 
         self.dual += prim_residual_matrix;
 
         // Use infinity norm for simplicity and strictness
-        self.max_prim_residual = prim_residual_matrix.abs().max();
-        self.max_dual_residual = (old_slac - self.slac).abs().max();
+        self.max_prim_residual = prim_residual_matrix.abs().sum();
+        self.max_dual_residual = (old_slac - self.slac).abs().sum();
     }
 
     pub fn add_cost(&self, cost: &mut SMatrix<T, N, H>) {

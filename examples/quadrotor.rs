@@ -1,5 +1,5 @@
-use nalgebra::{matrix, vector, SMatrix, SVector, SimdPartialOrd};
-use tinympc_rs::{constraint::{BoxFixed, DynConstraint}, AdaptiveCache, TinyMpc};
+use nalgebra::{matrix, vector, SMatrix, SVector};
+use tinympc_rs::{constraint::{BoxFixed, DynConstraint, Project}, TinyMpc};
 
 /*
 
@@ -18,14 +18,7 @@ fn main() {
 
     // Configure settings
     mpc.config.do_check = 1;
-    mpc.config.max_iter = 200;
-
-    let caches = AdaptiveCache::<_, _, 9, Float>::compute(2.0, 1000, &A, &B, &Q, &R).unwrap();
-
-    for index in 0..8 {
-        let cache0 = &caches.caches[index];
-        println!("Cache {index}: {}", cache0.Klqr);
-    }
+    mpc.config.max_iter = 20;
 
     // Constant reference through entire horizon
     let mut xref = SMatrix::<Float, 12, HX>::zeros();
@@ -42,8 +35,8 @@ fn main() {
     ];
 
     let ucon_box1 = BoxFixed::new()
-            .with_lower(SVector::from_element(Some(-0.2)))
-            .with_upper(SVector::from_element(Some(0.2)));
+            .with_lower(SVector::from_element(Some(-0.4)))
+            .with_upper(SVector::from_element(Some(0.4)));
 
     let mut u_constraints = [
         &mut DynConstraint::new(&ucon_box1)
@@ -59,7 +52,7 @@ fn main() {
             xref.set_column(i, &reference);
         }
 
-        let (reason, u) = mpc.solve(
+        let (reason, mut u) = mpc.solve(
             x,
             Some(&xref),
             None,
@@ -75,7 +68,7 @@ fn main() {
         );
 
         // Iterate simulation
-        let u = u.simd_clamp(SMatrix::from_element(-0.5), SMatrix::from_element(0.5));
+        ucon_box1.project(&mut u);
         x = A * x + B * u;
 
         total_iters += mpc.get_num_iters();

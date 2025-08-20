@@ -7,8 +7,6 @@ authors = ["Peter Krull"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["std"]
-std = []
 
 [dependencies]
 nalgebra = { version = "0.34.0", default-features = false, features = ["libm", "macros"] }

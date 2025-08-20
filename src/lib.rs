@@ -1,4 +1,4 @@
-// #![no_std]
+#![no_std]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -10,21 +10,22 @@
 
 use nalgebra::{convert, RealField, SMatrix, SVector, Scalar};
 
-use crate::constraint::DynConstraint;
+use crate::constraint::{Constraint, Project};
 
 pub mod constraint;
 
 /// Errors that can occur during system setup
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Error {
     InvalidHorizonLengths,
+    RhoNotPositiveDefinite,
     QNotPositiveSemidefinite,
     RNotPositiveDefinite,
     RpBPBNotInvertible,
     NonFiniteValues,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TerminationReason {
     Converged,
     MaxIters,
@@ -33,8 +34,8 @@ pub enum TerminationReason {
 #[derive(Debug)]
 pub struct TinyMpc<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize, F> {
     pub config: Config<F>,
-    pub cache: Cache<Nx, Nu, F>,
-    pub state: State<Nx, Nu, Hx, Hu, F>,
+    cache: Cache<Nx, Nu, F>,
+    state: State<Nx, Nu, Hx, Hu, F>,
 }
 
 #[derive(Debug)]
@@ -49,25 +50,25 @@ pub struct Config<F> {
 #[derive(Debug)]
 pub struct Cache<const Nx: usize, const Nu: usize, F> {
     /// Penalty-parameter for this cache
-    pub rho: F,
+    rho: F,
 
     /// Augmented state penalty vector
-    pub Q_aug: SVector<F, Nx>,
+    Q_aug: SVector<F, Nx>,
 
     /// Augmented input penalty vector
-    pub R_aug: SVector<F, Nu>,
+    R_aug: SVector<F, Nu>,
 
     /// Infinite-time horizon LQR gain
-    pub Klqr: SMatrix<F, Nu, Nx>,
+    Klqr: SMatrix<F, Nu, Nx>,
 
     /// Infinite-time horizon LQR Hessian
-    pub Plqr: SMatrix<F, Nx, Nx>,
+    Plqr: SMatrix<F, Nx, Nx>,
 
     /// Precomputed `inv((R + I*rho) + B^T * Plqr * B)`
-    pub RpBPBi: SMatrix<F, Nu, Nu>,
+    RpBPBi: SMatrix<F, Nu, Nu>,
 
     /// Precomputed `(A - B * Klqr)^T`
-    pub AmBKt: SMatrix<F, Nx, Nx>,
+    AmBKt: SMatrix<F, Nx, Nx>,
 }
 
 impl<const Nx: usize, const Nu: usize, T> Cache<Nx, Nu, T>
@@ -83,6 +84,10 @@ where
         R: &SVector<T, Nu>,
     ) -> Result<Self, Error> {
 
+        if !rho.is_positive() {
+            return Err(Error::RhoNotPositiveDefinite);
+        }
+
         if !Q.iter().all(|q| q >= &T::zero()) {
             return Err(Error::QNotPositiveSemidefinite);
         }
@@ -91,7 +96,6 @@ where
             return Err(Error::RNotPositiveDefinite);
         }
 
-        // Shadow the original values with the augmented variants
         let Q_aug = Q.add_scalar(rho);
         let R_aug = R.add_scalar(rho);
 
@@ -101,12 +105,14 @@ where
         let mut Klqr = SMatrix::zeros();
         let mut Plqr = Q_diag.clone_owned();
 
+        const INVERR: Error = Error::RpBPBNotInvertible;
+
         for _ in 0..iters {
-            Klqr = (R_diag + B.transpose() * Plqr * B).try_inverse().ok_or(Error::RpBPBNotInvertible)? * (B.transpose() * Plqr * A);
+            Klqr = (R_diag + B.transpose() * Plqr * B).try_inverse().ok_or(INVERR)? * (B.transpose() * Plqr * A);
             Plqr = A.transpose() * Plqr * A - A.transpose() * Plqr * B * Klqr + Q_diag;
         }
 
-        let RpBPBi = (R_diag + B.transpose() * Plqr * B).try_inverse().ok_or(Error::RpBPBNotInvertible)?;
+        let RpBPBi = (R_diag + B.transpose() * Plqr * B).try_inverse().ok_or(INVERR)?;
         let AmBKt = (A - B * Klqr).transpose();
 
         ([].iter())
@@ -127,56 +133,14 @@ where
 }
 
 #[derive(Debug)]
-pub struct AdaptiveCache<const Nx: usize, const Nu: usize, const NumRho: usize, F> {
-    pub caches: [Cache<Nx, Nu, F>; NumRho]
-}
-
-impl<const Nx: usize, const Nu: usize, const NumRho: usize, T> AdaptiveCache<Nx, Nu, NumRho, T>
-where
-    T: Scalar + RealField + Copy,
-{
-    pub fn compute(
-        base_rho: T,
-        iters: usize,
-        A: &SMatrix<T, Nx, Nx>,
-        B: &SMatrix<T, Nx, Nu>,
-        Q: &SVector<T, Nx>,
-        R: &SVector<T, Nu>,
-    ) -> Result<Self, Error> {
-
-        let mut initializing = [const {None}; NumRho];
-
-        let base_index = NumRho / 2;
-
-        for index in 0..NumRho {
-            let power = index as isize - base_index as isize;
-            
-            // For powers of 2, we can use bit shifting (1 << n) which is 2^n
-            let factor = convert((1 << power.abs()) as f64);
-            let rho = if power.is_positive() {
-                base_rho * factor
-            } else if power.is_negative() {
-                base_rho / factor
-            } else {
-                base_rho
-            };
-
-            let cache = Cache::compute(rho, iters, A, B, Q, R)?;
-            initializing[index] = Some(cache)
-        }
-
-        // This will always succeed since Cache::compute short circuits above.
-        let caches = initializing.map(|x|x.unwrap());
-
-        Ok(AdaptiveCache{ caches})
-    }
-}
-
-#[derive(Debug)]
 pub struct State<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize, F> {
     // Linear state space model
     A: SMatrix<F, Nx, Nx>,
     B: SMatrix<F, Nx, Nu>,
+
+    /// In case A and B are sparse, a function doing the
+    /// `x' <- A*x + B*u` calculation manually is likely faster.
+    sys: Option<fn(SVector<F, Nx>, SVector<F, Nu>) -> SVector<F, Nx>>,
 
     // State and input predictions
     x: SMatrix<F, Nx, Hx>,
@@ -223,6 +187,7 @@ where
             state: State {
                 A,
                 B,
+                sys: None,
                 x: SMatrix::zeros(),
                 u: SMatrix::zeros(),
                 x_cost: SMatrix::zeros(),
@@ -234,13 +199,18 @@ where
         })
     }
 
+    pub fn with_sys(mut self, sys: fn(SVector<F, Nx>, SVector<F, Nu>) -> SVector<F, Nx>) -> Self {
+        self.state.sys = Some(sys);
+        self
+    }
+
     pub fn solve(
         &mut self,
         xnow: SVector<F, Nx>,
         xref: Option<&SMatrix<F, Nx, Hx>>,
         uref: Option<&SMatrix<F, Nu, Hu>>,
-        mut xcon: Option<&mut [&mut DynConstraint<F, Nx, Hx>]>,
-        mut ucon: Option<&mut [&mut DynConstraint<F, Nu, Hu>]>,
+        mut xcon: Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
+        mut ucon: Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
     ) -> (TerminationReason, SVector<F, Nu>) {
         let mut termination_reason = TerminationReason::MaxIters;
 
@@ -278,8 +248,8 @@ where
 
     /// Shift the dual variables by one time step for more accurate hot starting
     fn shift_constraint_variables(&mut self,
-        xcon: &mut Option<&mut [&mut DynConstraint<F, Nx, Hx>]>,
-        ucon: &mut Option<&mut [&mut DynConstraint<F, Nu, Hu>]>,
+        xcon: &mut Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
+        ucon: &mut Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
     ) {
         if let Some(cons) = xcon.as_mut() {
             for con in cons.iter_mut() {
@@ -298,8 +268,8 @@ where
     fn update_cost(&mut self, 
         xref: Option<&SMatrix<F, Nx, Hx>>,
         uref: Option<&SMatrix<F, Nu, Hu>>,
-        xcon: &Option<&mut [&mut DynConstraint<F, Nx, Hx>]>,
-        ucon: &Option<&mut [&mut DynConstraint<F, Nu, Hu>]>,
+        xcon: &Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
+        ucon: &Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
     ) {
         let s = &mut self.state;
         let c = &self.cache;
@@ -382,27 +352,45 @@ where
         let s = &mut self.state;
         let c = &self.cache;
 
-        // Forward-pass with initial state
-        s.u.set_column(0, &(-c.Klqr * xnow - s.u_ricc.column(0)));
-        s.x.set_column(0, &(s.A * xnow + s.B * s.u.column(0)));
+        if let Some(sys) = s.sys {
+            // Forward-pass with initial state
+            s.u.set_column(0, &(-c.Klqr * xnow - s.u_ricc.column(0)));
+            s.x.set_column(0, &sys(xnow, s.u.column(0).clone_owned()));
 
-        // Roll out trajectory up to the control horizon Hu
-        for i in 1..Hu {
-            s.u.set_column(i, &(-c.Klqr * s.x.column(i - 1) - s.u_ricc.column(i)));
-            s.x.set_column(i, &(s.A * s.x.column(i - 1) + s.B * s.u.column(i)));
-        }
+            // Roll out trajectory up to the control horizon Hu
+            for i in 1..Hu {
+                s.u.set_column(i, &(-c.Klqr * s.x.column(i - 1) - s.u_ricc.column(i)));
+                s.x.set_column(i, &sys(s.x.column(i - 1).clone_owned(), s.u.column(i).clone_owned()));
+            }
 
-        // For the rest of the prediction horizon (Hx), hold the last control input constant
-        let u_final = s.u.column(Hu - 1).clone_owned();
-        for i in Hu..Hx {
-            s.x.set_column(i, &(s.A * s.x.column(i - 1) + s.B * u_final));
+            // For the rest of the prediction horizon (Hx), hold the last control input constant
+            let u_final = s.u.column(Hu - 1).clone_owned();
+            for i in Hu..Hx {
+                s.x.set_column(i, &sys(s.x.column(i - 1).clone_owned(), u_final));
+            }
+        } else {
+            // Forward-pass with initial state
+            s.u.set_column(0, &(-c.Klqr * xnow - s.u_ricc.column(0)));
+            s.x.set_column(0, &(s.A * xnow + s.B * s.u.column(0)));
+
+            // Roll out trajectory up to the control horizon Hu
+            for i in 1..Hu {
+                s.u.set_column(i, &(-c.Klqr * s.x.column(i - 1) - s.u_ricc.column(i)));
+                s.x.set_column(i, &(s.A * s.x.column(i - 1) + s.B * s.u.column(i)));
+            }
+
+            // For the rest of the prediction horizon (Hx), hold the last control input constant
+            let u_final = s.u.column(Hu - 1);
+            for i in Hu..Hx {
+                s.x.set_column(i, &(s.A * s.x.column(i - 1) + s.B * u_final));
+            }
         }
     }
 
     /// Project slack variables into their feasible domain and update dual variables
     fn update_constraints(&mut self,
-        xcon: &mut Option<&mut [&mut DynConstraint<F, Nx, Hx>]>,
-        ucon: &mut Option<&mut [&mut DynConstraint<F, Nu, Hu>]>,
+        xcon: &mut Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
+        ucon: &mut Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
     ) {
         let s = &mut self.state;
 
@@ -422,8 +410,8 @@ where
     /// Check for termination condition by evaluating residuals
     fn check_termination(
         &mut self,
-        xcon: &Option<&mut [&mut DynConstraint<F, Nx, Hx>]>,
-        ucon: &Option<&mut [&mut DynConstraint<F, Nu, Hu>]>,
+        xcon: &Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
+        ucon: &Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
     ) -> bool {
         let s = &mut self.state;
         let c = &self.cache;
