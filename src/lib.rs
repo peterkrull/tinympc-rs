@@ -209,10 +209,13 @@ where
         xnow: SVector<F, Nx>,
         xref: Option<&SMatrix<F, Nx, Hx>>,
         uref: Option<&SMatrix<F, Nu, Hu>>,
-        mut xcon: Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
-        mut ucon: Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
+        xcon: Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
+        ucon: Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
     ) -> (TerminationReason, SVector<F, Nu>) {
-        let mut termination_reason = TerminationReason::MaxIters;
+        let mut reason = TerminationReason::MaxIters;
+
+        let mut xcon = xcon.unwrap_or(&mut [][..]);
+        let mut ucon = ucon.unwrap_or(&mut [][..]);
 
         // Better warm-starting of dual variables from prior solution
         self.shift_constraint_variables(&mut xcon, &mut ucon);
@@ -222,7 +225,7 @@ where
         while self.state.iter < self.config.max_iter {
 
             // Update linear control cost terms
-            self.update_cost(xref, uref, &xcon, &ucon);
+            self.update_cost(xref, uref, xcon, ucon);
 
             // Backward pass to update Ricatti variables
             self.backward_pass();
@@ -234,33 +237,29 @@ where
             self.update_constraints(&mut xcon, &mut ucon);
 
             // Check for early-stop condition
-            if self.check_termination(&xcon, &ucon) {
+            if self.check_termination(xcon, ucon) {
+                reason = TerminationReason::Converged;
                 self.state.iter += 1; 
-                termination_reason = TerminationReason::Converged;
                 break;
             }
 
             self.state.iter += 1;
         }
 
-        (termination_reason, self.get_u())
+        (reason, self.get_u())
     }
 
     /// Shift the dual variables by one time step for more accurate hot starting
     fn shift_constraint_variables(&mut self,
-        xcon: &mut Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
-        ucon: &mut Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
+        xcon: &mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>],
+        ucon: &mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>],
     ) {
-        if let Some(cons) = xcon.as_mut() {
-            for con in cons.iter_mut() {
-                con.time_shift_variables();
-            }
+        for con in xcon {
+            con.time_shift_variables();
         }
 
-        if let Some(cons) = ucon.as_mut() {
-            for con in cons.iter_mut() {
-                con.time_shift_variables();
-            }
+        for con in ucon {
+            con.time_shift_variables();
         }
     }
 
@@ -268,8 +267,8 @@ where
     fn update_cost(&mut self, 
         xref: Option<&SMatrix<F, Nx, Hx>>,
         uref: Option<&SMatrix<F, Nu, Hu>>,
-        xcon: &Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
-        ucon: &Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
+        xcon: &mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>],
+        ucon: &mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>],
     ) {
         let s = &mut self.state;
         let c = &self.cache;
@@ -278,16 +277,16 @@ where
         s.u_cost = SMatrix::<F, Nu, Hu>::zeros();
 
         // Add cost contribution for state constraint violations
-        if let Some(cons) = xcon {
-            for con in cons.iter() {
+        if !xcon.is_empty() {
+            for con in xcon {
                 con.add_cost(&mut s.x_cost);
             }
             s.x_cost.scale_mut(c.rho);
         }
         
         // Add cost contribution for input constraint violations
-        if let Some(cons) = ucon {
-            for con in cons.iter() {
+        if !ucon.is_empty() {
+            for con in ucon {
                 con.add_cost(&mut s.u_cost);
             }
             s.u_cost.scale_mut(c.rho);
@@ -389,29 +388,25 @@ where
 
     /// Project slack variables into their feasible domain and update dual variables
     fn update_constraints(&mut self,
-        xcon: &mut Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
-        ucon: &mut Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
+        xcon: &mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>],
+        ucon: &mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>],
     ) {
         let s = &mut self.state;
 
-        if let Some(cons) = xcon.as_mut() {
-            for con in cons.iter_mut() {
-                con.constrain(&s.x);
-            }
+        for con in xcon {
+            con.constrain(&s.x);
         }
 
-        if let Some(cons) = ucon.as_mut() {
-            for con in cons.iter_mut() {
-                con.constrain(&s.u);
-            }
+        for con in ucon {
+            con.constrain(&s.u);
         }
     }
 
     /// Check for termination condition by evaluating residuals
     fn check_termination(
         &mut self,
-        xcon: &Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
-        ucon: &Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
+        xcon: &[&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>],
+        ucon: &[&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>],
     ) -> bool {
         let s = &mut self.state;
         let c = &self.cache;
@@ -424,18 +419,14 @@ where
         let mut max_prim_residual = F::zero();
         let mut max_dual_residual = F::zero();
 
-        if let Some(cons) = xcon {
-            for con in cons.iter() {
-                max_prim_residual = max_prim_residual.max(con.max_prim_residual);
-                max_dual_residual = max_dual_residual.max(con.max_dual_residual);
-            }
+        for con in xcon.iter() {
+            max_prim_residual = max_prim_residual.max(con.max_prim_residual);
+            max_dual_residual = max_dual_residual.max(con.max_dual_residual);
         }
 
-        if let Some(cons) = ucon {
-            for con in cons.iter() {
-                max_prim_residual = max_prim_residual.max(con.max_prim_residual);
-                max_dual_residual = max_dual_residual.max(con.max_dual_residual);
-            }
+        for con in ucon.iter() {
+            max_prim_residual = max_prim_residual.max(con.max_prim_residual);
+            max_dual_residual = max_dual_residual.max(con.max_dual_residual);
         }
 
         // TODO Do adaptive rho
