@@ -1,7 +1,7 @@
 use nalgebra::{RealField, SMatrix, SVector};
 
 pub trait Project<T, const N: usize, const H: usize> {
-    /// Applies the projection to the point, modifying it in place
+    /// Applies the projection to a series of points, modifying them in place
     fn project(&self, points: &mut SMatrix<T, N, H>);
 }
 
@@ -88,8 +88,8 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for B
 pub type DynConstraint<'a, F, const N: usize, const H: usize> =  Constraint<F, &'a dyn Project<F, N, H>, N, H>;
 
 pub struct Constraint<T, P: Project<T, N, H>, const N: usize, const H: usize> {
-    pub(crate) max_prim_residual: T,
-    pub(crate) max_dual_residual: T,
+    pub max_prim_residual: T,
+    pub max_dual_residual: T,
     slac: SMatrix<T, N, H>,
     dual: SMatrix<T, N, H>,
     projector: P

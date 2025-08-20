@@ -40,13 +40,20 @@ pub struct TinyMpc<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: 
 
 #[derive(Debug)]
 pub struct Config<F> {
+    /// The convergence tolerance for the primal residual (default 0.001)
     pub prim_tol: F,
+    
+    /// The convergence tolerance for the dual residual  (default 0.001)
     pub dual_tol: F,
+    
+    /// Maximum iterations without converging before terminating (default 50)
     pub max_iter: usize,
+
+    /// Number of iterations between evaluating convergence (default 5)
     pub do_check: usize,
 }
 
-/// Contains all pre-computed values
+/// Contains all pre-computed values for a given problem and value of rho
 #[derive(Debug)]
 pub struct Cache<const Nx: usize, const Nu: usize, F> {
     /// Penalty-parameter for this cache
@@ -61,10 +68,10 @@ pub struct Cache<const Nx: usize, const Nu: usize, F> {
     /// Infinite-time horizon LQR gain
     Klqr: SMatrix<F, Nu, Nx>,
 
-    /// Infinite-time horizon LQR Hessian
+    /// Infinite-time horizon LQR cost-to-go
     Plqr: SMatrix<F, Nx, Nx>,
 
-    /// Precomputed `inv((R + I*rho) + B^T * Plqr * B)`
+    /// Precomputed `inv(R_aug + B^T * Plqr * B)`
     RpBPBi: SMatrix<F, Nu, Nu>,
 
     /// Precomputed `(A - B * Klqr)^T`
@@ -115,6 +122,7 @@ where
         let RpBPBi = (R_diag + B.transpose() * Plqr * B).try_inverse().ok_or(INVERR)?;
         let AmBKt = (A - B * Klqr).transpose();
 
+        // If RpBPBi and AmBKt are finite, so are all the other values
         ([].iter())
             .chain(RpBPBi.iter())
             .chain(AmBKt.iter())
@@ -180,7 +188,7 @@ where
             config: Config {
                 prim_tol: convert(1e-3),
                 dual_tol: convert(1e-3),
-                max_iter: 20,
+                max_iter: 50,
                 do_check: 5,
             },
             cache: Cache::compute(rho, Hx, &A, &B, &Q, &R)?,
