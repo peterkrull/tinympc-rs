@@ -1,5 +1,5 @@
 use nalgebra::{matrix, vector, SMatrix, SVector};
-use tinympc_rs::{constraint::{Box, DynConstraint, Project}, TinyMpc};
+use tinympc_rs::{constraint::{Box, DynConstraint, Project}, rho_cache::LookupCache, TinyMpc};
 
 /*
 
@@ -14,7 +14,9 @@ const HX: usize = 10;
 const HU: usize = 10;
 
 fn main() {
-    let mut mpc = TinyMpc::<12, 4, HX, HU, Float>::new(A, B, Q, R, RHO).unwrap();
+
+
+    let mut mpc = TinyMpc::<Float, LookupCache<Float, 12, 4, 9>, 12, 4, HX, HU>::new(A, B, Q, R, RHO).unwrap();
 
     // Configure settings
     mpc.config.max_iter = 20;

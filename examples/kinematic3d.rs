@@ -1,9 +1,11 @@
+use std::time::Duration;
+
 use nalgebra::{matrix, vector, SMatrix, SVector, SVectorView};
 use rerun::Color;
-use tinympc_rs::{constraint::{Box, Project as _, ProjectExt as _, Sphere}, Error};
+use tinympc_rs::{constraint::{Box, Project as _, ProjectExt as _, Sphere}, rho_cache::{LookupCache, SingleCache}, Error, TinyMpc};
 
-const HX: usize = 150;
-const HU: usize = HX - 5;
+const HX: usize = 200;
+const HU: usize = HX - 10;
 
 const NX: usize = 9;
 const NU: usize = 3;
@@ -51,9 +53,9 @@ fn sys(x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) -> SVector<f32, NX> {
     ].into()
 }
 
-pub static Q: SVector<f32, NX> = vector! {200., 200., 200., 0., 0., 0., 0., 0., 0.};
-pub static R: SVector<f32, NU> = vector! {5.0, 5.0, 5.0};
-pub static RHO: f32 = 50.0;
+pub static Q: SVector<f32, NX> = vector! {100., 100., 100., 0., 0., 0., 0., 0., 0.};
+pub static R: SVector<f32, NU> = vector! {25.0, 25.0, 25.0};
+pub static RHO: f32 = 4.;
 
 fn main() -> Result<(), Error> {
 
@@ -61,9 +63,13 @@ fn main() -> Result<(), Error> {
         .spawn()
         .unwrap();
 
-    let mut mpc = tinympc_rs::TinyMpc::<NX, NU, HX, HU, f32>::new(A, B, Q, R, RHO)?;
-    mpc.config.max_iter = 10;
-    mpc.config.do_check = 5;
+    // type Cache = LookupCache<f32, NX, NU, 7>;
+    type Cache = SingleCache<f32, NX, NU>;
+    type Mpc = TinyMpc::<f32, Cache, NX, NU, HX, HU>;
+
+    let mut mpc = Mpc::new(A, B, Q, R, RHO)?;
+    mpc.config.max_iter = 200;
+    mpc.config.do_check = 4;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 
@@ -72,28 +78,21 @@ fn main() -> Result<(), Error> {
 
     let xcon_sphere = Sphere {
         center: vector![None, None, None, Some(0.0), Some(0.0), Some(0.0), None, None, None],
-        radius: 2.0
+        radius: 200.0
     };
-
-    let mut xcon = [&mut xcon_sphere.into_dyn_constraint()];
 
     let ucon_sphere = Sphere {
         center: vector![Some(0.0), Some(0.0), Some(0.0)],
-        radius: 1.0,
+        radius: 2.0,
     };
-
-    let mut ucon = [&mut ucon_sphere.into_dyn_constraint()];
 
     let mut true_pos = vec![vector![0.0, 0.0, 0.0]];
 
+    let mut total_iters = 0;
     let mut k = 0;
-    loop {
+    while k < 1700 {
         k += 1;
-        let time = std::time::Instant::now();
-        let (reason, mut unow) = mpc.solve(xnow, Some(xref.as_view()), None, Some(&mut xcon), Some(&mut ucon));
-        println!("Got solution: {:?} in {} ms)", unow.as_slice(), time.elapsed().as_micros() as f32 / 1e3);
 
-        std::thread::sleep(std::time::Duration::from_millis(16));
 
         for i in 0..HX {
             let mut xref_col = SVector::zeros();
@@ -101,29 +100,33 @@ fn main() -> Result<(), Error> {
             xref_col[1] = ((i + k) as f32 / 10.0 / (1.0 + (i + k) as f32 / 1500.)).cos() * 4.;
             xref_col[2] = (i + k) as f32 / 100.0 ;
 
-            if k + i > 400 && i + k < 1200 {
+            if k > 400 && k < 1200 {
                 xref_col[0] += -20.0;
             }
 
-            if k + i > 600 && i + k < 1500 {
+            if k > 600 && k < 1500 {
                 xref_col[1] += -15.0;
             }
 
-
             xref.set_column(i, &xref_col);
         }
+
+        let mut xcon = [&mut xcon_sphere.into_dyn_constraint()];
+        let mut ucon = [&mut ucon_sphere.into_dyn_constraint()];
+
+        let time = std::time::Instant::now();
+        let (reason, mut unow) = mpc.solve(xnow, Some(xref.as_view()), None, Some(&mut xcon), Some(&mut ucon));
+        println!("Got solution: {:?} in {} ms)", unow.as_slice(), time.elapsed().as_micros() as f32 / 1e3);
+
+        total_iters += mpc.get_num_iters();
+
+        // std::thread::sleep(std::time::Duration::from_millis(16));
+
 
         match reason {
             tinympc_rs::TerminationReason::Converged => println!("Converged in {} iters", mpc.get_num_iters()),
             tinympc_rs::TerminationReason::MaxIters => println!("Reached max ({}) iters", mpc.get_num_iters()),
         }
-
-        // Apply input to system
-        ucon_sphere.project(unow.as_view_mut());
-        xnow = A * xnow + B * unow;
-        println!("State vector: {:?}", xnow.as_slice());
-
-
 
 
 
@@ -134,6 +137,7 @@ fn main() -> Result<(), Error> {
         // ------ RERUN VISUALIZATION -------
 
 
+        rec.set_time("timeline", Duration::from_millis((50*k) as u64));
 
 
         let u_mat = mpc.get_u_matrix().clone();
@@ -295,5 +299,14 @@ fn main() -> Result<(), Error> {
         let strips = rerun::LineStrips3D::new([pos_pred_strips]).with_colors([Color::WHITE]);
         rec.log("x_position_pred", &strips).unwrap();
 
+
+
+        // Apply input to system
+        ucon_sphere.project(unow.as_view_mut());
+        xnow = A * xnow + B * unow;
     }
+
+    println!("Total iterations: {total_iters}");
+
+    Ok(())
 }

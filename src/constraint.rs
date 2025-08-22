@@ -239,4 +239,8 @@ impl <T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>> 
         cost += &scratch;
     }
 
+    pub fn rescale_dual(&mut self, scalar: T) {
+        self.dual.scale_mut(scalar);
+    }
+
 }
