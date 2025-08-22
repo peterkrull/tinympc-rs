@@ -1,5 +1,9 @@
-use nalgebra::{matrix, vector, SMatrix, SVector};
-use tinympc_rs::{constraint::{Box, DynConstraint, Project}, TinyMpc};
+use nalgebra::{SMatrix, SVector, matrix, vector};
+use tinympc_rs::{
+    TinyMpc,
+    constraint::{Box, DynConstraint, Project},
+    rho_cache::LookupCache,
+};
 
 /*
 
@@ -14,7 +18,9 @@ const HX: usize = 10;
 const HU: usize = 10;
 
 fn main() {
-    let mut mpc = TinyMpc::<12, 4, HX, HU, Float>::new(A, B, Q, R, RHO).unwrap();
+    let mut mpc =
+        TinyMpc::<Float, LookupCache<Float, 12, 4, 9>, 12, 4, HX, HU>::new(A, B, Q, R, RHO)
+            .unwrap();
 
     // Configure settings
     mpc.config.max_iter = 20;
@@ -27,20 +33,16 @@ fn main() {
     let mut x = vector![0.0, 1.0, 0.0, 0.2, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0];
 
     let xcon_box1 = Box::new()
-            .with_lower(SVector::from_element(Some(-5.0)))
-            .with_upper(SVector::from_element(Some(5.0)));
+        .with_lower(SVector::from_element(Some(-5.0)))
+        .with_upper(SVector::from_element(Some(5.0)));
 
-    let mut x_constraints = [
-        &mut DynConstraint::new(&xcon_box1)
-    ];
+    let mut x_constraints = [&mut DynConstraint::new(&xcon_box1)];
 
     let ucon_box1 = Box::new()
-            .with_lower(SVector::from_element(Some(-0.4)))
-            .with_upper(SVector::from_element(Some(0.4)));
+        .with_lower(SVector::from_element(Some(-0.4)))
+        .with_upper(SVector::from_element(Some(0.4)));
 
-    let mut u_constraints = [
-        &mut DynConstraint::new(&ucon_box1)
-    ];
+    let mut u_constraints = [&mut DynConstraint::new(&ucon_box1)];
 
     let mut total_iters = 0;
     for k in 0..100 {
