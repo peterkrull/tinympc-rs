@@ -58,7 +58,7 @@ fn sys(x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) -> SVector<f32, NX> {
 }
 
 pub static Q: SVector<f32, NX> = vector! {5., 5., 5., 0., 0., 0., 0., 0., 0.};
-pub static R: SVector<f32, NU> = vector! {25., 25., 25.};
+pub static R: SVector<f32, NU> = vector! {5., 5., 5.};
 pub static RHO: f32 = 1.0;
 
 fn main() -> Result<(), Error> {
@@ -259,7 +259,7 @@ fn main() -> Result<(), Error> {
 
         let x = xnow;
 
-        let vec = mpc.get_x_at(0);
+        let vec = mpc.get_x_matrix().column(0);
         rec.log(
             "position",
             &rerun::Points3D::new([[vec[0] as f32, vec[1] as f32, vec[2] as f32]])

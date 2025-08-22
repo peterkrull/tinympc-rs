@@ -50,7 +50,7 @@ fn main() {
     for k in 0..100 {
         // Run solvers
 
-        for i in 0..mpc.prediction_horizon_length() {
+        for i in 0..HX {
             let mut reference = SVector::zeros();
             reference[2] = ((i + k) as Float / 10.0).sin();
             xref.set_column(i, &reference);

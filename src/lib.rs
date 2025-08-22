@@ -229,9 +229,6 @@ where
         for con in ucon {
             left_shift_matrix(&mut con.dual);
         }
-
-        left_shift_matrix(&mut self.state.x);
-        left_shift_matrix(&mut self.state.u);
     }
 
     /// Update linear control cost terms
@@ -468,13 +465,9 @@ where
         terminate
     }
 
+    /// Get the number of iterations of the previous solve
     pub fn get_num_iters(&self) -> usize {
         self.state.iter
-    }
-
-    /// Get the system state `x` for the time `i`
-    pub fn get_x_at(&self, i: usize) -> SVector<T, Nx> {
-        self.state.x.column(i).into()
     }
 
     /// Get the system input `u` for the time `i`
@@ -495,18 +488,5 @@ where
     /// Get reference to matrix containing input predictions
     pub fn get_u_matrix(&self) -> &SMatrix<T, Nu, Hu> {
         &self.state.u
-    }
-
-    pub fn prediction_horizon_length(&self) -> usize {
-        Hx
-    }
-    pub fn control_horizon_length(&self) -> usize {
-        Hu
-    }
-    pub fn num_states(&self) -> usize {
-        Nx
-    }
-    pub fn num_inputs(&self) -> usize {
-        Nu
     }
 }
