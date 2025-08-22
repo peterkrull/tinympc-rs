@@ -4,8 +4,8 @@ use nalgebra::{matrix, vector, SMatrix, SVector, SVectorView};
 use rerun::Color;
 use tinympc_rs::{constraint::{Project as _, ProjectExt as _, Sphere}, Error, TinyMpc};
 
-const HX: usize = 200;
-const HU: usize = HX - 10;
+const HX: usize = 150;
+const HU: usize = HX - 5;
 
 const NX: usize = 9;
 const NU: usize = 3;
@@ -53,7 +53,7 @@ fn sys(x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) -> SVector<f32, NX> {
     ].into()
 }
 
-pub static Q: SVector<f32, NX> = vector! {100., 100., 100., 0., 0., 0., 0., 0., 0.};
+pub static Q: SVector<f32, NX> = vector! {200., 200., 200., 0., 0., 0., 0., 0., 0.};
 pub static R: SVector<f32, NU> = vector! {5.0, 5.0, 5.0};
 pub static RHO: f32 = 50.;
 
@@ -129,9 +129,9 @@ fn main() -> Result<(), Error> {
         }
 
 
-
-
-
+        // Apply input to system
+        ucon_sphere.project(unow.as_view_mut());
+        xnow = A * xnow + B * unow;
 
 
         // ------ RERUN VISUALIZATION -------
@@ -300,10 +300,6 @@ fn main() -> Result<(), Error> {
         rec.log("x_position_pred", &strips).unwrap();
 
 
-
-        // Apply input to system
-        ucon_sphere.project(unow.as_view_mut());
-        xnow = A * xnow + B * unow;
     }
 
     println!("Total iterations: {total_iters}");
