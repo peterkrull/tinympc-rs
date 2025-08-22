@@ -18,6 +18,31 @@ impl<P: Project<T, N, H>, T, const N: usize, const H: usize> Project<T, N, H> fo
     }
 }
 
+macro_rules! derive_tuple_project {
+    ($($project:ident: $number:tt),+) => {
+        impl<$($project: Project<T, N, H>),+, T, const N: usize, const H: usize> Project<T, N, H>
+            for ( $($project,)+ )
+        {
+            fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+                $(
+                    self.$number.project(points.as_view_mut());
+                )+
+            }
+        }
+    };
+}
+
+derive_tuple_project!{P0: 0}
+derive_tuple_project!{P0: 0, P1: 1}
+derive_tuple_project!{P0: 0, P1: 1, P2: 2}
+derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3}
+derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4}
+derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5}
+derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6}
+derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7}
+derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8}
+derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8, P9: 9}
+
 /// Extension trait for types implementing [`Project`] to convert it directly
 /// into a constraint with associated dual and slack variables.
 pub trait ProjectExt<T: RealField + Copy, const N: usize, const H: usize>:

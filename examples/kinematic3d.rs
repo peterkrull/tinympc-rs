@@ -3,8 +3,7 @@ use std::time::Duration;
 use nalgebra::{SMatrix, SVector, SVectorView, matrix, vector};
 use rerun::Color;
 use tinympc_rs::{
-    Error, TinyMpc,
-    constraint::{Project as _, ProjectExt as _, Sphere},
+    constraint::{Box, Project as _, ProjectExt as _, Sphere}, Error, TinyMpc
 };
 
 const HX: usize = 100;
@@ -57,8 +56,8 @@ fn sys(x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) -> SVector<f32, NX> {
     .into()
 }
 
-pub static Q: SVector<f32, NX> = vector! {5., 5., 5., 0., 0., 0., 0., 0., 0.};
-pub static R: SVector<f32, NU> = vector! {5., 5., 5.};
+pub static Q: SVector<f32, NX> = vector! {9., 9., 9., 0., 0., 0., 0., 0., 0.};
+pub static R: SVector<f32, NU> = vector! {3., 3., 3.};
 pub static RHO: f32 = 1.0;
 
 fn main() -> Result<(), Error> {
@@ -80,12 +79,21 @@ fn main() -> Result<(), Error> {
     let mut xref = SMatrix::<f32, NX, HX>::zeros();
 
     #[rustfmt::skip]
-    let xcon_sphere = Sphere {
+    let x_project_sphere = Sphere {
         center: vector![None, None, None, Some(0.0), Some(0.0), Some(0.0), None, None, None],
         radius: 4.0,
     };
 
-    let xcon_sphere_dyn = &mut xcon_sphere.dyn_constraint();
+    #[rustfmt::skip]
+    let x_project_box = Box {
+        upper: vector![Some(50.0), Some(50.0), Some(50.0), None, None, None, None, None, None],
+        lower: vector![Some(-50.0), Some(-50.0), Some(-50.0), None, None, None, None, None, None],
+    };
+
+    // Two (or more!) projectors can be used together, saving a pair of slack/dual variables.
+    // This should only be done if one constraint cannot immediately invalidate another constrant.
+    let x_projector = (x_project_sphere, x_project_box);
+    let mut xcon = x_projector.dyn_constraint();
 
     let ucon_sphere = Sphere {
         center: vector![Some(0.0), Some(0.0), Some(0.0)],
@@ -94,20 +102,20 @@ fn main() -> Result<(), Error> {
 
     let ucon_sphere_dyn = &mut ucon_sphere.dyn_constraint();
 
-    let mut xcon = [xcon_sphere_dyn];
+    let mut xcon = [&mut xcon];
     let mut ucon = [ucon_sphere_dyn];
 
     let mut true_pos = vec![vector![0.0, 0.0, 0.0]];
 
     let mut total_iters = 0;
     let mut k = 0;
-    while k < 1700 {
+    while k < 2000 {
         k += 1;
 
         for i in 0..HX {
             let mut xref_col = SVector::zeros();
-            xref_col[0] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 2500.)).sin() * 4.;
-            xref_col[1] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 2500.)).cos() * 4.;
+            xref_col[0] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 1000.)).sin() * 4.;
+            xref_col[1] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 1000.)).cos() * 4.;
             xref_col[2] = (i + k) as f32 / 100.0;
 
             if i + k > 400 && i + k < 1200 {
@@ -217,7 +225,7 @@ fn main() -> Result<(), Error> {
         let strips = rerun::LineStrips2D::new([x_x, x_y, x_z]);
         rec.log("x_vel_strips", &strips).unwrap();
 
-        xcon_sphere.project(x_mat.as_view_mut());
+        x_projector.project(x_mat.as_view_mut());
 
         let x_iter = x_mat.column_iter().enumerate();
         let x_x = rerun::LineStrip2D::from_iter(
