@@ -1,5 +1,6 @@
-use nalgebra::{RealField, SMatrix, SMatrixView, SMatrixViewMut, SVector, Unit};
+use nalgebra::{convert, RealField, SMatrix, SMatrixView, SMatrixViewMut, SVector, Unit};
 
+/// Can project a series of points into their feasible region.
 pub trait Project<T, const N: usize, const H: usize> {
     /// Applies the projection to a series of points, modifying them in place
     fn project(&self, points: SMatrixViewMut<T, N, H>);
@@ -17,22 +18,16 @@ impl<P: Project<T, N, H>, T, const N: usize, const H: usize> Project<T, N, H> fo
     }
 }
 
-impl<'a, P: Project<T, N, H>, T: RealField + Copy, const N: usize, const H: usize> From<&'a P>
-    for Constraint<T, &'a dyn Project<T, N, H>, N, H>
-{
-    fn from(value: &'a P) -> Self {
-        Constraint::new(value as &dyn Project<T, N, H>)
-    }
-}
-
+/// Extension trait for types implementing [`Project`] to convert it directly
+/// into a constraint with associated dual and slack variables.
 pub trait ProjectExt<T: RealField + Copy, const N: usize, const H: usize>:
     Project<T, N, H> + Sized
 {
-    fn into_constraint(&self) -> Constraint<T, &Self, N, H> {
+    fn constraint(&self) -> Constraint<T, &Self, N, H> {
         Constraint::new(self)
     }
 
-    fn into_dyn_constraint(&self) -> DynConstraint<'_, T, N, H> {
+    fn dyn_constraint(&self) -> DynConstraint<'_, T, N, H> {
         Constraint::new(self as &dyn Project<T, N, H>)
     }
 }
@@ -42,34 +37,10 @@ impl<S: Project<T, N, H>, T: RealField + Copy, const N: usize, const H: usize> P
 {
 }
 
-/// Simple box constraint that is constant throughout the horizon.
+/// A box constraint that is constant throughout the horizon.
 pub struct Box<T, const N: usize> {
     pub lower: SVector<Option<T>, N>,
     pub upper: SVector<Option<T>, N>,
-}
-
-impl<T: RealField, const N: usize> Box<T, N> {
-    /// Construct a new unconstrained `BoxProjection` that is
-    pub fn new() -> Self {
-        Self {
-            lower: SVector::from_element(None),
-            upper: SVector::from_element(None),
-        }
-    }
-
-    pub fn with_upper(self, upper: impl Into<SVector<Option<T>, N>>) -> Self {
-        Self {
-            upper: upper.into(),
-            ..self
-        }
-    }
-
-    pub fn with_lower(self, lower: impl Into<SVector<Option<T>, N>>) -> Self {
-        Self {
-            lower: lower.into(),
-            ..self
-        }
-    }
 }
 
 impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Box<T, N> {
@@ -88,6 +59,7 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for B
     }
 }
 
+/// A spherical constraint that is constant throughout the horizon
 #[derive(Debug, Copy, Clone)]
 pub struct Sphere<T, const N: usize> {
     pub center: SVector<Option<T>, N>,
@@ -131,6 +103,7 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for S
     }
 }
 
+/// A half-space constraint that is constant throughout the horizon
 #[derive(Debug, Copy, Clone)]
 pub struct HalfSpace<T, const N: usize> {
     pub center: SVector<T, N>,
@@ -152,9 +125,11 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for H
     }
 }
 
+/// Type alias for a [`Constraint`] that dynamically dispatches its projection function
 pub type DynConstraint<'a, F, const N: usize, const H: usize> =
     Constraint<F, &'a dyn Project<F, N, H>, N, H>;
 
+/// A [`Constraint`] consists of a projection function and a set of associated slack and dual variables.
 pub struct Constraint<T, P: Project<T, N, H>, const N: usize, const H: usize> {
     pub max_prim_residual: T,
     pub max_dual_residual: T,
@@ -166,33 +141,23 @@ pub struct Constraint<T, P: Project<T, N, H>, const N: usize, const H: usize> {
 impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
     Constraint<T, P, N, H>
 {
+    /// Construct a new [`Constraint`] from the provided [`Project`] type.
     pub fn new(projector: P) -> Self {
         Self {
-            max_prim_residual: T::max_value().unwrap(),
-            max_dual_residual: T::max_value().unwrap(),
+            max_prim_residual: convert(1e9),
+            max_dual_residual: convert(1e9),
             slac: SMatrix::zeros(),
             dual: SMatrix::zeros(),
             projector,
         }
     }
 
-    /// Shifts slack and dual variables forward by 1 time step.
-    /// Used at the beginning of a solve to correctlt hot-start the values.
-    pub fn time_shift_variables(&mut self) {
-        fn left_shift_matrix<F, const ROWS: usize, const COLS: usize>(
-            matrix: &mut SMatrix<F, ROWS, COLS>,
-        ) {
-            if COLS > 1 {
-                let element_count = ROWS * (COLS - 1);
-                let ptr = matrix.as_mut_slice().as_mut_ptr();
-
-                unsafe {
-                    core::ptr::copy(ptr.add(ROWS), ptr, element_count);
-                }
-            }
-        }
-
-        left_shift_matrix(&mut self.dual);
+    /// Reset all internal state of this constraint
+    pub fn reset(&mut self) {
+        self.max_prim_residual = convert(1e9);
+        self.max_dual_residual = convert(1e9);
+        self.slac = SMatrix::zeros();
+        self.dual = SMatrix::zeros();
     }
 
     /// Constrains the set of points, and if `update_res == true`, computes the maximum primal and dual residuals
@@ -233,7 +198,8 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
         }
     }
 
-    pub fn add_cost(
+    /// Add the cost associated with this constraints violation to a cost sum
+    pub(crate) fn add_cost(
         &mut self,
         mut cost: SMatrixViewMut<T, N, H>,
         mut scratch: SMatrixViewMut<T, N, H>,
@@ -242,7 +208,27 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
         cost += &scratch;
     }
 
-    pub fn rescale_dual(&mut self, scalar: T) {
+    /// Re-scale the dual variables for when the value of rho has changed
+    pub(crate) fn rescale_dual(&mut self, scalar: T) {
         self.dual.scale_mut(scalar);
+    }
+
+    /// Shifts dual variables forward by 1 time step.
+    /// Used at the beginning of a solve to hot-start the values.
+    pub(crate) fn time_shift_variables(&mut self) {
+        fn left_shift_matrix<F, const ROWS: usize, const COLS: usize>(
+            matrix: &mut SMatrix<F, ROWS, COLS>,
+        ) {
+            if COLS > 1 {
+                let element_count = ROWS * (COLS - 1);
+                let ptr = matrix.as_mut_slice().as_mut_ptr();
+
+                unsafe {
+                    core::ptr::copy(ptr.add(ROWS), ptr, element_count);
+                }
+            }
+        }
+
+        left_shift_matrix(&mut self.dual);
     }
 }

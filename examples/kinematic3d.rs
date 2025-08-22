@@ -59,7 +59,7 @@ fn sys(x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) -> SVector<f32, NX> {
 
 pub static Q: SVector<f32, NX> = vector! {5., 5., 5., 0., 0., 0., 0., 0., 0.};
 pub static R: SVector<f32, NU> = vector! {1., 1., 1.};
-pub static RHO: f32 = 2.0;
+pub static RHO: f32 = 1.0;
 
 fn main() -> Result<(), Error> {
     let rec = rerun::RecordingStreamBuilder::new("tinympc-constraints")
@@ -71,7 +71,7 @@ fn main() -> Result<(), Error> {
     type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
 
     let mut mpc = Mpc::new(A, B, Q, R, RHO)?.with_sys(sys);
-    mpc.config.max_iter = 5;
+    mpc.config.max_iter = 50;
     mpc.config.do_check = 2;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
@@ -82,17 +82,17 @@ fn main() -> Result<(), Error> {
     #[rustfmt::skip]
     let xcon_sphere = Sphere {
         center: vector![None, None, None, Some(0.0), Some(0.0), Some(0.0), None, None, None],
-        radius: 2.0,
+        radius: 4.0,
     };
 
-    let xcon_sphere_dyn = &mut xcon_sphere.into_dyn_constraint();
+    let xcon_sphere_dyn = &mut xcon_sphere.dyn_constraint();
 
     let ucon_sphere = Sphere {
         center: vector![Some(0.0), Some(0.0), Some(0.0)],
-        radius: 2.0,
+        radius: 10.0,
     };
 
-    let ucon_sphere_dyn = &mut ucon_sphere.into_dyn_constraint();
+    let ucon_sphere_dyn = &mut ucon_sphere.dyn_constraint();
 
     let mut xcon = [xcon_sphere_dyn];
     let mut ucon = [ucon_sphere_dyn];
@@ -106,8 +106,8 @@ fn main() -> Result<(), Error> {
 
         for i in 0..HX {
             let mut xref_col = SVector::zeros();
-            xref_col[0] = ((i + k) as f32 / 10.0 / (1.0 + (i + k) as f32 / 1500.)).sin() * 4.;
-            xref_col[1] = ((i + k) as f32 / 10.0 / (1.0 + (i + k) as f32 / 1500.)).cos() * 4.;
+            xref_col[0] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 2500.)).sin() * 4.;
+            xref_col[1] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 2500.)).cos() * 4.;
             xref_col[2] = (i + k) as f32 / 100.0;
 
             if i + k > 400 && i + k < 1200 {

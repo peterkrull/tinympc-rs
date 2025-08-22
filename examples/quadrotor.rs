@@ -32,15 +32,17 @@ fn main() {
     // Dynamic state vector
     let mut x = vector![0.0, 1.0, 0.0, 0.2, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0];
 
-    let xcon_box1 = Box::new()
-        .with_lower(SVector::from_element(Some(-5.0)))
-        .with_upper(SVector::from_element(Some(5.0)));
+    let xcon_box1 = Box {
+        lower: SVector::from_element(Some(-5.0)),
+        upper: SVector::from_element(Some(5.0)),
+    };
 
     let mut x_constraints = [&mut DynConstraint::new(&xcon_box1)];
 
-    let ucon_box1 = Box::new()
-        .with_lower(SVector::from_element(Some(-0.4)))
-        .with_upper(SVector::from_element(Some(0.4)));
+    let ucon_box1 = Box {
+        lower: SVector::from_element(Some(-0.4)),
+        upper: SVector::from_element(Some(0.4)),
+    };
 
     let mut u_constraints = [&mut DynConstraint::new(&ucon_box1)];
 
