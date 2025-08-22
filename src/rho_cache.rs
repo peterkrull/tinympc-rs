@@ -27,10 +27,10 @@ pub struct SingleCache<T, const Nx: usize, const Nu: usize> {
     /// Penalty-parameter for this cache
     pub(crate) rho: T,
 
-    /// Infinite-time horizon LQR gain
-    pub(crate) Klqr: SMatrix<T, Nu, Nx>,
+    /// Negated infinite-time horizon LQR gain
+    pub(crate) negKlqr: SMatrix<T, Nu, Nx>,
 
-    /// Transpoed infinite-time horizon LQR gain
+    /// Transposed infinite-time horizon LQR gain
     pub(crate) Klqrt: SMatrix<T, Nx, Nu>,
 
     /// Infinite-time horizon LQR cost-to-go
@@ -83,6 +83,7 @@ impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx
         }
 
         let Klqrt = Klqr.transpose();
+        let negKlqr = - Klqr;
 
         let RpBPBi = (R_diag + B.transpose() * Plqr * B)
             .try_inverse()
@@ -96,7 +97,7 @@ impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx
             .all(|x| x.is_finite())
             .then(|| SingleCache {
                 rho,
-                Klqr,
+                negKlqr,
                 Klqrt,
                 Plqr,
                 RpBPBi,

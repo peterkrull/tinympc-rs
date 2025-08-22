@@ -70,7 +70,7 @@ fn main() -> Result<(), Error> {
     // type Cache = tinympc_rs::rho_cache::SingleCache<f32, NX, NU>;
     type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
 
-    let mut mpc = Mpc::new(A, B, Q, R, RHO)?;
+    let mut mpc = Mpc::new(A, B, Q, R, RHO)?.with_sys(sys);
     mpc.config.max_iter = 5;
     mpc.config.do_check = 2;
 

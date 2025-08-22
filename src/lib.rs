@@ -319,6 +319,7 @@ where
             c.RpBPBi.mul_to(&u_scratch_vec, &mut s.u_ricc.column_mut(i));
         }
 
+
         // The backward pass integrates cost-to-go over the full prediction horizon Hx
         for i in (0..Hx - 1).rev() {
             let x_ricc_next = s.x_ricc.column(i + 1);
@@ -330,7 +331,7 @@ where
                 u_scratch_vec += &s.u_cost.column(i);
                 c.RpBPBi.mul_to(&u_scratch_vec, &mut s.u_ricc.column_mut(i));
 
-                // Calc :: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i+1] + Klqr^T * u_cost[i]
+                // Calc :: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i + 1] + Klqr^T * u_cost[i]
                 c.AmBKt.mul_to(&x_ricc_next, &mut s.x_scratch.column_mut(0));
                 c.Klqrt
                     .mul_to(&s.u_cost.column(i), &mut s.x_scratch.column_mut(1));
@@ -340,7 +341,7 @@ where
                     .add_to(&s.x_scratch.column(0), &mut x_ricc_vec);
                 x_ricc_vec -= &s.x_scratch.column(1);
             } else {
-                // Update: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i+1] + Klqr^T * u_cost[Hu - 1]
+                // Update: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i + 1] + Klqr^T * u_cost[Hu - 1]
                 c.AmBKt.mul_to(&x_ricc_next, &mut s.x_scratch.column_mut(0));
                 c.Klqrt
                     .mul_to(&s.u_cost.column(Hu - 1), &mut s.x_scratch.column_mut(1));
@@ -367,7 +368,9 @@ where
             for i in 0..Hu {
 
                 // Calc :: u[i] = -K * x[i] + u_ricc[i]
-                s.u.set_column(i, &(-c.Klqr * s.x.column(i) - s.u_ricc.column(i)));
+                let mut u_col = s.u.column_mut(i);
+                c.negKlqr.mul_to(&s.x.column(i), &mut u_col);
+                u_col -= &s.u_ricc.column(i);
 
                 // Calc :: x[i+1] = A * x[i] +  B * u[i]
                 s.x.set_column(i + 1, &sys(s.x.column(i), s.u.column(i)));
@@ -388,7 +391,7 @@ where
 
                 // Calc :: u[i] = -K * x[i] + u_ricc[i]
                 let mut u_col = s.u.column_mut(i);
-                c.Klqr.mul_to(&-xnow, &mut u_col);
+                c.negKlqr.mul_to(&xnow, &mut u_col);
                 u_col -= &s.u_ricc.column(i);
 
                 // Calc :: x[i+1] = A * x[i] +  B * u[i]
