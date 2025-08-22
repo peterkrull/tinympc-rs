@@ -1,4 +1,4 @@
-use nalgebra::{convert, RealField, SMatrix, SVector, Scalar};
+use nalgebra::{RealField, SMatrix, SVector, Scalar, convert};
 
 use crate::Error;
 
@@ -11,7 +11,11 @@ pub trait Cache<T, const Nx: usize, const Nu: usize>: Sized {
         Q: &SVector<T, Nx>,
         R: &SVector<T, Nu>,
     ) -> Result<Self, Error>;
-    fn select_cache(&mut self, prim_residual: T, dual_residual: T) -> Option<T>;
+
+    /// Updates which cache is active by evaluating the primal and dual residuals.
+    ///
+    /// Returns: A scalar (old_rho/new_rho) to be applied to constraint duals in case the cache changed
+    fn update_active(&mut self, prim_residual: T, dual_residual: T) -> Option<T>;
 
     /// Get a reference to the currently active cache.
     fn get_active(&self) -> &SingleCache<T, Nx, Nu>;
@@ -39,8 +43,9 @@ pub struct SingleCache<T, const Nx: usize, const Nu: usize> {
     pub(crate) AmBKt: SMatrix<T, Nx, Nx>,
 }
 
-
-impl <T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx, Nu> for SingleCache<T, Nx, Nu> {
+impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx, Nu>
+    for SingleCache<T, Nx, Nu>
+{
     fn new(
         rho: T,
         iters: usize,
@@ -49,7 +54,6 @@ impl <T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, N
         Q: &SVector<T, Nx>,
         R: &SVector<T, Nu>,
     ) -> Result<Self, Error> {
-
         if !rho.is_positive() {
             return Err(Error::RhoNotPositiveDefinite);
         }
@@ -71,13 +75,18 @@ impl <T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, N
         const INVERR: Error = Error::RpBPBNotInvertible;
 
         for _ in 0..iters {
-            Klqr = (R_diag + B.transpose() * Plqr * B).try_inverse().ok_or(INVERR)? * (B.transpose() * Plqr * A);
+            Klqr = (R_diag + B.transpose() * Plqr * B)
+                .try_inverse()
+                .ok_or(INVERR)?
+                * (B.transpose() * Plqr * A);
             Plqr = A.transpose() * Plqr * A - A.transpose() * Plqr * B * Klqr + Q_diag;
         }
 
         let Klqrt = Klqr.transpose();
 
-        let RpBPBi = (R_diag + B.transpose() * Plqr * B).try_inverse().ok_or(INVERR)?;
+        let RpBPBi = (R_diag + B.transpose() * Plqr * B)
+            .try_inverse()
+            .ok_or(INVERR)?;
         let AmBKt = (A - B * Klqr).transpose();
 
         // If RpBPBi and AmBKt are finite, so are all the other values
@@ -96,10 +105,10 @@ impl <T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, N
             .ok_or(Error::NonFiniteValues)
     }
 
-    fn select_cache(&mut self, _prim_residual: T, _dual_residual: T) -> Option<T> {
+    fn update_active(&mut self, _prim_residual: T, _dual_residual: T) -> Option<T> {
         None
     }
-    
+
     fn get_active(&self) -> &SingleCache<T, Nx, Nu> {
         self
     }
@@ -110,7 +119,7 @@ impl <T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, N
 pub struct LookupCache<T, const Nx: usize, const Nu: usize, const NUM: usize> {
     threshold: T,
     active_index: usize,
-    caches: [SingleCache<T, Nx, Nu>; NUM]
+    caches: [SingleCache<T, Nx, Nu>; NUM],
 }
 
 use std::mem::MaybeUninit;
@@ -124,7 +133,7 @@ pub fn try_array_from_fn<T: Sized, E, const N: usize>(
 ) -> Result<[T; N], E> {
     // Create an uninitialized array of `MaybeUninit`.
     let mut array = [const { MaybeUninit::<T>::uninit() }; N];
-    
+
     for i in 0..N {
         match cb(i) {
             Ok(val) => {
@@ -146,7 +155,7 @@ pub fn try_array_from_fn<T: Sized, E, const N: usize>(
             }
         }
     }
-    
+
     // If the loop completes, all elements are initialized, and we can
     // safely transition from `[MaybeUninit<T>; N]` to `[T; N]`.
     // Safety: We've just initialized every element in the loop above.
@@ -155,8 +164,10 @@ pub fn try_array_from_fn<T: Sized, E, const N: usize>(
     Ok(array)
 }
 
-impl <T, const Nx: usize, const Nu: usize, const NUM: usize> Cache<T, Nx, Nu> for LookupCache<T, Nx, Nu, NUM>
-where T: Scalar + RealField + Copy
+impl<T, const Nx: usize, const Nu: usize, const NUM: usize> Cache<T, Nx, Nu>
+    for LookupCache<T, Nx, Nu, NUM>
+where
+    T: Scalar + RealField + Copy,
 {
     fn new(
         central_rho: T,
@@ -171,7 +182,7 @@ where T: Scalar + RealField + Copy
 
         let caches = try_array_from_fn(|index| {
             let diff = index as i32 - active_index as i32;
-            let expo = convert::<f64, T>(1.5).powf(convert(diff as f64));
+            let expo = convert::<f64, T>(1.6).powf(convert(diff as f64));
             let rho = central_rho * expo;
             println!("Creating cache for rho {rho}, at index {index} (expo {expo})");
             SingleCache::new(rho, iters, A, B, Q, R) // returns error
@@ -184,11 +195,11 @@ where T: Scalar + RealField + Copy
         })
     }
 
-    fn select_cache(&mut self, prim_residual: T, dual_residual: T) -> Option<T> {
+    fn update_active(&mut self, prim_residual: T, dual_residual: T) -> Option<T> {
         let mut cache = &self.caches[self.active_index];
         let prev_rho = cache.rho;
 
-        // Since we are using a scaled dual formulation 
+        // Since we are using a scaled dual formulation
         let dual_residual = dual_residual * prev_rho;
 
         // For much larger primal residuals, increase rho
@@ -196,7 +207,6 @@ where T: Scalar + RealField + Copy
             self.active_index = (self.active_index + 1).min(NUM - 1);
             cache = &self.caches[self.active_index];
         }
-        
         // For much larger dual residuals, decrease rho
         else if dual_residual * self.threshold > prim_residual {
             self.active_index = self.active_index.saturating_sub(1);
@@ -204,11 +214,11 @@ where T: Scalar + RealField + Copy
         }
 
         // If the value of rho changed we must also rescale all duals
-        let rescale = (prev_rho != cache.rho).then(|| prev_rho / cache.rho  );
-        
+        let rescale = (prev_rho != cache.rho).then(|| prev_rho / cache.rho);
+
         rescale
     }
-    
+
     fn get_active(&self) -> &SingleCache<T, Nx, Nu> {
         &self.caches[self.active_index]
     }

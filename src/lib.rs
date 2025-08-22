@@ -2,29 +2,33 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-/*
+use nalgebra::{RealField, SMatrix, SMatrixView, SVector, SVectorView, Scalar, convert};
 
-    This work is heavily based off of TinyMPC [ https://tinympc.org/ ]
-
-*/
-
-use nalgebra::{convert, RealField, SMatrix, SMatrixView, SVector, SVectorView, Scalar};
-
-use crate::{constraint::{Constraint, Project}, rho_cache::Cache};
+use crate::{
+    constraint::{Constraint, Project},
+    rho_cache::Cache,
+};
 
 pub mod constraint;
 pub mod rho_cache;
 
-pub type LtiFn<F, const Nx: usize, const Nu: usize> = fn(SVectorView<F, Nx>, SVectorView<F, Nu>) -> SVector<F, Nx>;
+pub type LtiFn<F, const Nx: usize, const Nu: usize> =
+    fn(SVectorView<F, Nx>, SVectorView<F, Nu>) -> SVector<F, Nx>;
 
 /// Errors that can occur during system setup
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Error {
-    InvalidHorizonLengths,
+    /// The value of Hx must be larger than Hu `(Hx > Hu && Hu > 0)`
+    InvalidHorizonLength,
+    /// The value of rho must be strictly positive `(rho > 0)`
     RhoNotPositiveDefinite,
+    /// The entries of Q must be non-negative `all(Q) >= 0`
     QNotPositiveSemidefinite,
+    /// The entries of Q must be strictly positive `all(R) > 0`
     RNotPositiveDefinite,
+    /// The matrix `R_aug + B^T * P * B` is not invertible
     RpBPBNotInvertible,
+    /// The resulting matrices contained non-finite elements (Inf or NaN)
     NonFiniteValues,
 }
 
@@ -35,7 +39,14 @@ pub enum TerminationReason {
 }
 
 #[derive(Debug)]
-pub struct TinyMpc<T, C: rho_cache::Cache<T, Nx, Nu>, const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize> {
+pub struct TinyMpc<
+    T,
+    C: rho_cache::Cache<T, Nx, Nu>,
+    const Nx: usize,
+    const Nu: usize,
+    const Hx: usize,
+    const Hu: usize,
+> {
     pub config: Config<T>,
     cache: C,
     state: State<T, Nx, Nu, Hx, Hu>,
@@ -45,10 +56,10 @@ pub struct TinyMpc<T, C: rho_cache::Cache<T, Nx, Nu>, const Nx: usize, const Nu:
 pub struct Config<T> {
     /// The convergence tolerance for the primal residual (default 0.001)
     pub prim_tol: T,
-    
+
     /// The convergence tolerance for the dual residual  (default 0.001)
     pub dual_tol: T,
-    
+
     /// Maximum iterations without converging before terminating (default 50)
     pub max_iter: usize,
 
@@ -118,7 +129,7 @@ where
     ) -> Result<Self, Error> {
         // Guard against invalid horizon lengths
         if Hx <= Hu || Hu == 0 {
-            return Err(Error::InvalidHorizonLengths);
+            return Err(Error::InvalidHorizonLength);
         }
 
         Ok(Self {
@@ -169,7 +180,7 @@ where
         let mut ucon = ucon.unwrap_or(&mut [][..]);
 
         // Better warm-starting of dual variables from prior solution
-        timed!{
+        timed! {
             "shift constraint variables"
             self.shift_constraint_variables(&mut xcon, &mut ucon);
         }
@@ -177,10 +188,9 @@ where
         // Iteratively solve MPC problem
         self.state.iter = 0;
         while self.state.iter < self.config.max_iter {
-
             // defmt::debug!("Iteration number: {}", self.state.iter);
 
-            timed!{
+            timed! {
                 "Update linear control cost terms"
                 self.update_cost(xref, uref, xcon, ucon);
             }
@@ -203,7 +213,7 @@ where
             // Check for early-stop condition
             if self.check_termination(xcon, ucon) {
                 reason = TerminationReason::Converged;
-                self.state.iter += 1; 
+                self.state.iter += 1;
                 break;
             }
 
@@ -219,7 +229,8 @@ where
 
     /// Shift the dual variables by one time step for more accurate hot starting
     #[inline(never)]
-    fn shift_constraint_variables(&mut self,
+    fn shift_constraint_variables(
+        &mut self,
         xcon: &mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
         ucon: &mut [&mut Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
@@ -234,7 +245,8 @@ where
 
     /// Update linear control cost terms
     #[inline(never)]
-    fn update_cost(&mut self, 
+    fn update_cost(
+        &mut self,
         xref: Option<SMatrixView<T, Nx, Hx>>,
         uref: Option<SMatrixView<T, Nu, Hu>>,
         xcon: &mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
@@ -253,7 +265,7 @@ where
             }
             s.x_cost.scale_mut(c.rho);
         }
-        
+
         // Add cost contribution for input constraint violations
         if !ucon.is_empty() {
             for con in ucon {
@@ -272,7 +284,7 @@ where
                 x_cost_col -= &xref.column(i).component_mul(&s.Q);
             }
         }
-        
+
         if let Some(uref) = uref {
             for i in 0..Hu {
                 let mut u_cost_col = s.u_cost.column_mut(i);
@@ -301,7 +313,7 @@ where
         if Hu == Hx - 1 {
             let i = Hu - 1;
 
-            // Update: u_ricc[i] = RpBPBi * (B^T * x_ricc[i + 1] + u_cost[i])
+            // Calc :: u_ricc[i] = RpBPBi * (B^T * x_ricc[i + 1] + u_cost[i])
             s.Bt.mul_to(&s.x_ricc.column(i + 1), &mut u_scratch_vec);
             u_scratch_vec += &s.u_cost.column(i);
             c.RpBPBi.mul_to(&u_scratch_vec, &mut s.u_ricc.column_mut(i));
@@ -313,25 +325,29 @@ where
 
             // Control action is only optimized up to Hu
             if i < Hu {
-                // Update: u_ricc[i] = RpBPBi * (B^T * x_ricc[i + 1] + u_cost[i])
+                // Calc :: u_ricc[i] = RpBPBi * (B^T * x_ricc[i + 1] + u_cost[i])
                 s.Bt.mul_to(&x_ricc_next, &mut u_scratch_vec);
                 u_scratch_vec += &s.u_cost.column(i);
                 c.RpBPBi.mul_to(&u_scratch_vec, &mut s.u_ricc.column_mut(i));
 
-                // Update: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i+1] + Klqr^T * u_cost[i]
+                // Calc :: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i+1] + Klqr^T * u_cost[i]
                 c.AmBKt.mul_to(&x_ricc_next, &mut s.x_scratch.column_mut(0));
-                c.Klqrt.mul_to(&s.u_cost.column(i), &mut s.x_scratch.column_mut(1));
+                c.Klqrt
+                    .mul_to(&s.u_cost.column(i), &mut s.x_scratch.column_mut(1));
                 let mut x_ricc_vec = s.x_ricc.column_mut(i);
-                s.x_cost.column(i).add_to(&s.x_scratch.column(0), &mut x_ricc_vec);
+                s.x_cost
+                    .column(i)
+                    .add_to(&s.x_scratch.column(0), &mut x_ricc_vec);
                 x_ricc_vec -= &s.x_scratch.column(1);
-
             } else {
-
                 // Update: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i+1] + Klqr^T * u_cost[Hu - 1]
                 c.AmBKt.mul_to(&x_ricc_next, &mut s.x_scratch.column_mut(0));
-                c.Klqrt.mul_to(&s.u_cost.column(Hu - 1), &mut s.x_scratch.column_mut(1));
+                c.Klqrt
+                    .mul_to(&s.u_cost.column(Hu - 1), &mut s.x_scratch.column_mut(1));
                 let mut x_ricc_vec = s.x_ricc.column_mut(i);
-                s.x_cost.column(i).add_to(&s.x_scratch.column(0), &mut x_ricc_vec);
+                s.x_cost
+                    .column(i)
+                    .add_to(&s.x_scratch.column(0), &mut x_ricc_vec);
                 x_ricc_vec -= &s.x_scratch.column(1);
             }
         }
@@ -343,37 +359,39 @@ where
         let s = &mut self.state;
         let c = self.cache.get_active();
 
-        if let Some(sys) = s.sys {
-            // Forward-pass with initial state
-            s.u.set_column(0, &(-c.Klqr * xnow - s.u_ricc.column(0)));
-            s.x.set_column(0, &sys(xnow.as_view(), s.u.column(0)));
+        s.x.set_column(0, &xnow);
 
-            // Roll out trajectory up to the control horizon Hu
-            for i in 1..Hu {
-                s.u.set_column(i, &(-c.Klqr * s.x.column(i - 1) - s.u_ricc.column(i)));
-                s.x.set_column(i, &sys(s.x.column(i - 1), s.u.column(i)));
+        if let Some(sys) = s.sys {
+
+            // Roll out trajectory up to the control horizon (Hu)
+            for i in 0..Hu {
+
+                // Calc :: u[i] = -K * x[i] + u_ricc[i]
+                s.u.set_column(i, &(-c.Klqr * s.x.column(i) - s.u_ricc.column(i)));
+
+                // Calc :: x[i+1] = A * x[i] +  B * u[i]
+                s.x.set_column(i + 1, &sys(s.x.column(i), s.u.column(i)));
             }
 
-            // For the rest of the prediction horizon (Hx), hold the last control input constant
+            // Roll out rest of trajectory keeping u constant
             let u_final = s.u.column(Hu - 1);
             for i in Hu..Hx {
+
+                // Calc :: x[i+1] = A * x[i] +  B * u[Hu - 1]
                 s.x.set_column(i, &sys(s.x.column(i - 1), u_final));
             }
         } else {
 
-            s.x.set_column(0, &xnow);
-
             // Roll out trajectory up to the control horizon Hu
             for i in 0..Hu {
-
                 xnow.copy_from(&s.x.column(i));
 
-                // Forward-pass of u[i] with state x[i]
+                // Calc :: u[i] = -K * x[i] + u_ricc[i]
                 let mut u_col = s.u.column_mut(i);
                 c.Klqr.mul_to(&-xnow, &mut u_col);
                 u_col -= &s.u_ricc.column(i);
 
-                // Forward-pass of x[i + 1] with state x[i] and u[i]
+                // Calc :: x[i+1] = A * x[i] +  B * u[i]
                 let mut x_col = s.x.column_mut(i + 1);
                 s.A.mul_to(&xnow, &mut x_col);
                 x_col.gemm(T::one(), &s.B, &u_col, T::one());
@@ -382,10 +400,9 @@ where
             // Roll out rest of trajectory keeping u constant
             let u_final = s.u.column(Hu - 1);
             for i in Hu..Hx - 1 {
-                
                 xnow.copy_from(&s.x.column(i));
-                
-                // Forward-pass of x[i + 1] with state x[i] and u[Hu - 1]
+
+                // Calc :: x[i+1] = A * x[i] +  B * u[i]
                 let mut x_col = s.x.column_mut(i + 1);
                 s.A.mul_to(&xnow, &mut x_col);
                 x_col.gemm(T::one(), &s.B, &u_final, T::one());
@@ -395,7 +412,8 @@ where
 
     /// Project slack variables into their feasible domain and update dual variables
     #[inline(never)]
-    fn update_constraints(&mut self,
+    fn update_constraints(
+        &mut self,
         xcon: &mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
         ucon: &mut [&mut Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
@@ -403,11 +421,11 @@ where
         let s = &mut self.state;
 
         for con in xcon {
-            con.constrain(s.x.as_view(), s.x_scratch.as_view_mut(), update_res);
+            con.constrain(update_res, s.x.as_view(), s.x_scratch.as_view_mut());
         }
 
         for con in ucon {
-            con.constrain(s.u.as_view(), s.u_scratch.as_view_mut(), update_res);
+            con.constrain(update_res, s.u.as_view(), s.u_scratch.as_view_mut());
         }
     }
 
@@ -422,7 +440,7 @@ where
         let cfg = &self.config;
 
         if !self.should_calculate_residuals() {
-            return false
+            return false;
         }
 
         let mut max_prim_residual = T::zero();
@@ -438,21 +456,24 @@ where
             max_dual_residual = max_dual_residual.max(con.max_dual_residual);
         }
 
-        let terminate = max_prim_residual < cfg.prim_tol && max_dual_residual * c.rho < cfg.dual_tol;
+        let terminate =
+            max_prim_residual < cfg.prim_tol && max_dual_residual * c.rho < cfg.dual_tol;
 
         // Try to adapt rho
         if !terminate {
-            if let Some(scalar) = self.cache.select_cache(max_prim_residual, max_dual_residual) {
-
+            if let Some(scalar) = self
+                .cache
+                .update_active(max_prim_residual, max_dual_residual)
+            {
                 println!("Switching to cache: rho = {}", self.cache.get_active().rho);
 
-                for con in xcon.iter_mut() {{
+                for con in xcon.iter_mut() {
                     con.rescale_dual(scalar)
-                }}
+                }
 
-                for con in ucon.iter_mut() {{
+                for con in ucon.iter_mut() {
                     con.rescale_dual(scalar)
-                }}
+                }
             }
         }
 
