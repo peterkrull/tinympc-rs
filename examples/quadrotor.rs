@@ -1,5 +1,5 @@
 use nalgebra::{matrix, vector, SMatrix, SVector};
-use tinympc_rs::{constraint::{BoxFixed, DynConstraint, Project}, TinyMpc};
+use tinympc_rs::{constraint::{Box, DynConstraint, Project}, TinyMpc};
 
 /*
 
@@ -10,15 +10,15 @@ use tinympc_rs::{constraint::{BoxFixed, DynConstraint, Project}, TinyMpc};
 
 type Float = f32;
 
-const HX: usize = 40;
-const HU: usize = 30;
+const HX: usize = 10;
+const HU: usize = 10;
 
 fn main() {
     let mut mpc = TinyMpc::<12, 4, HX, HU, Float>::new(A, B, Q, R, RHO).unwrap();
 
     // Configure settings
-    mpc.config.do_check = 1;
     mpc.config.max_iter = 20;
+    mpc.config.do_check = 1;
 
     // Constant reference through entire horizon
     let mut xref = SMatrix::<Float, 12, HX>::zeros();
@@ -26,7 +26,7 @@ fn main() {
     // Dynamic state vector
     let mut x = vector![0.0, 1.0, 0.0, 0.2, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0];
 
-    let xcon_box1 = BoxFixed::new()
+    let xcon_box1 = Box::new()
             .with_lower(SVector::from_element(Some(-5.0)))
             .with_upper(SVector::from_element(Some(5.0)));
 
@@ -34,7 +34,7 @@ fn main() {
         &mut DynConstraint::new(&xcon_box1)
     ];
 
-    let ucon_box1 = BoxFixed::new()
+    let ucon_box1 = Box::new()
             .with_lower(SVector::from_element(Some(-0.4)))
             .with_upper(SVector::from_element(Some(0.4)));
 
@@ -54,7 +54,7 @@ fn main() {
 
         let (reason, mut u) = mpc.solve(
             x,
-            Some(&xref),
+            Some(xref.as_view()),
             None,
             Some(&mut x_constraints),
             Some(&mut u_constraints),
@@ -68,7 +68,7 @@ fn main() {
         );
 
         // Iterate simulation
-        ucon_box1.project(&mut u);
+        ucon_box1.project(u.as_view_mut());
         x = A * x + B * u;
 
         total_iters += mpc.get_num_iters();

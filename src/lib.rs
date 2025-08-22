@@ -1,4 +1,4 @@
-#![no_std]
+// #![no_std]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -8,11 +8,13 @@
 
 */
 
-use nalgebra::{convert, RealField, SMatrix, SVector, Scalar};
+use nalgebra::{convert, RealField, SMatrix, SMatrixView, SVector, SVectorView, Scalar};
 
 use crate::constraint::{Constraint, Project};
 
 pub mod constraint;
+
+pub type LtiFn<F, const Nx: usize, const Nu: usize> = fn(SVectorView<F, Nx>, SVectorView<F, Nu>) -> SVector<F, Nx>;
 
 /// Errors that can occur during system setup
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -68,6 +70,9 @@ pub struct Cache<const Nx: usize, const Nu: usize, F> {
     /// Infinite-time horizon LQR gain
     Klqr: SMatrix<F, Nu, Nx>,
 
+    /// Transpoed infinite-time horizon LQR gain
+    Klqrt: SMatrix<F, Nx, Nu>,
+
     /// Infinite-time horizon LQR cost-to-go
     Plqr: SMatrix<F, Nx, Nx>,
 
@@ -119,6 +124,8 @@ where
             Plqr = A.transpose() * Plqr * A - A.transpose() * Plqr * B * Klqr + Q_diag;
         }
 
+        let Klqrt = Klqr.transpose();
+
         let RpBPBi = (R_diag + B.transpose() * Plqr * B).try_inverse().ok_or(INVERR)?;
         let AmBKt = (A - B * Klqr).transpose();
 
@@ -132,6 +139,7 @@ where
                 Q_aug,
                 R_aug,
                 Klqr,
+                Klqrt,
                 Plqr,
                 RpBPBi,
                 AmBKt,
@@ -140,19 +148,34 @@ where
     }
 }
 
+macro_rules! timed {
+    ($description:literal $($token:tt)+) => {
+        // let time = embassy_time::Instant::now();
+        $($token)+
+        // let elapsed = time.elapsed();
+        // defmt::info!("Elapsed: {} us :: ({})", elapsed.as_micros(), $description);
+        // embassy_time::Timer::after_micros(500).await;
+    };
+}
+
 #[derive(Debug)]
 pub struct State<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize, F> {
     // Linear state space model
     A: SMatrix<F, Nx, Nx>,
     B: SMatrix<F, Nx, Nu>,
+    Bt: SMatrix<F, Nu, Nx>,
 
     /// In case A and B are sparse, a function doing the
     /// `x' <- A*x + B*u` calculation manually is likely faster.
-    sys: Option<fn(SVector<F, Nx>, SVector<F, Nu>) -> SVector<F, Nx>>,
+    sys: Option<LtiFn<F, Nx, Nu>>,
 
     // State and input predictions
     x: SMatrix<F, Nx, Hx>,
     u: SMatrix<F, Nu, Hu>,
+
+    // Scratch buffers for zero allocation operations
+    x_scratch: SMatrix<F, Nx, Hx>,
+    u_scratch: SMatrix<F, Nu, Hu>,
 
     // Linear cost matrices
     x_cost: SMatrix<F, Nx, Hx>,
@@ -195,9 +218,12 @@ where
             state: State {
                 A,
                 B,
+                Bt: B.transpose(),
                 sys: None,
                 x: SMatrix::zeros(),
                 u: SMatrix::zeros(),
+                x_scratch: SMatrix::zeros(),
+                u_scratch: SMatrix::zeros(),
                 x_cost: SMatrix::zeros(),
                 u_cost: SMatrix::zeros(),
                 x_ricc: SMatrix::zeros(),
@@ -207,16 +233,17 @@ where
         })
     }
 
-    pub fn with_sys(mut self, sys: fn(SVector<F, Nx>, SVector<F, Nu>) -> SVector<F, Nx>) -> Self {
+    pub fn with_sys(mut self, sys: LtiFn<F, Nx, Nu>) -> Self {
         self.state.sys = Some(sys);
         self
     }
 
+    #[inline(never)]
     pub fn solve(
         &mut self,
         xnow: SVector<F, Nx>,
-        xref: Option<&SMatrix<F, Nx, Hx>>,
-        uref: Option<&SMatrix<F, Nu, Hu>>,
+        xref: Option<SMatrixView<'_, F, Nx, Hx>>,
+        uref: Option<SMatrixView<'_, F, Nu, Hu>>,
         xcon: Option<&mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>]>,
         ucon: Option<&mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>]>,
     ) -> (TerminationReason, SVector<F, Nu>) {
@@ -226,23 +253,36 @@ where
         let mut ucon = ucon.unwrap_or(&mut [][..]);
 
         // Better warm-starting of dual variables from prior solution
-        self.shift_constraint_variables(&mut xcon, &mut ucon);
+        timed!{
+            "shift constraint variables"
+            self.shift_constraint_variables(&mut xcon, &mut ucon);
+        }
 
         // Iteratively solve MPC problem
         self.state.iter = 0;
         while self.state.iter < self.config.max_iter {
 
-            // Update linear control cost terms
-            self.update_cost(xref, uref, xcon, ucon);
+            // defmt::debug!("Iteration number: {}", self.state.iter);
 
-            // Backward pass to update Ricatti variables
-            self.backward_pass();
+            timed!{
+                "Update linear control cost terms"
+                self.update_cost(xref, uref, xcon, ucon);
+            }
 
-            // Roll out to get new trajectory
-            self.forward_pass(xnow);
+            timed! {
+                "Backward pass to update Ricatti variables"
+                self.backward_pass();
+            }
 
-            // Project into feasible domain
-            self.update_constraints(&mut xcon, &mut ucon);
+            timed! {
+                "Roll out to get new trajectory"
+                self.forward_pass(xnow);
+            }
+
+            timed! {
+                "Project into feasible domain"
+                self.update_constraints(xcon, ucon);
+            }
 
             // Check for early-stop condition
             if self.check_termination(xcon, ucon) {
@@ -257,7 +297,12 @@ where
         (reason, self.get_u())
     }
 
+    fn should_calculate_residuals(&self) -> bool {
+        self.state.iter % self.config.do_check == 0
+    }
+
     /// Shift the dual variables by one time step for more accurate hot starting
+    #[inline(never)]
     fn shift_constraint_variables(&mut self,
         xcon: &mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>],
         ucon: &mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>],
@@ -272,9 +317,10 @@ where
     }
 
     /// Update linear control cost terms
+    #[inline(never)]
     fn update_cost(&mut self, 
-        xref: Option<&SMatrix<F, Nx, Hx>>,
-        uref: Option<&SMatrix<F, Nu, Hu>>,
+        xref: Option<SMatrixView<F, Nx, Hx>>,
+        uref: Option<SMatrixView<F, Nu, Hu>>,
         xcon: &mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>],
         ucon: &mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>],
     ) {
@@ -287,7 +333,7 @@ where
         // Add cost contribution for state constraint violations
         if !xcon.is_empty() {
             for con in xcon {
-                con.add_cost(&mut s.x_cost);
+                con.add_cost(s.x_cost.as_view_mut(), s.x_scratch.as_view_mut());
             }
             s.x_cost.scale_mut(c.rho);
         }
@@ -295,7 +341,7 @@ where
         // Add cost contribution for input constraint violations
         if !ucon.is_empty() {
             for con in ucon {
-                con.add_cost(&mut s.u_cost);
+                con.add_cost(s.u_cost.as_view_mut(), s.u_scratch.as_view_mut());
             }
             s.u_cost.scale_mut(c.rho);
         }
@@ -307,35 +353,42 @@ where
         if let Some(xref) = xref {
             for i in 0..Hx {
                 let mut x_cost_col = s.x_cost.column_mut(i);
-                x_cost_col -= xref.column(i).component_mul(&c.Q_aug);
+                x_cost_col -= &xref.column(i).component_mul(&c.Q_aug);
             }
         }
+        
         if let Some(uref) = uref {
-        for i in 0..Hu {
+            for i in 0..Hu {
                 let mut u_cost_col = s.u_cost.column_mut(i);
-                u_cost_col -= uref.column(i).component_mul(&c.R_aug);
+                u_cost_col -= &uref.column(i).component_mul(&c.R_aug);
             }
         }
 
         // Add the terminal tracking penalty, which uses Plqr
         if let Some(xref) = xref {
             let mut x_ricc_terminal = s.x_ricc.column_mut(Hx - 1);
-            x_ricc_terminal -= c.Plqr * xref.column(Hx - 1);
+            x_ricc_terminal -= &c.Plqr * xref.column(Hx - 1);
         }
     }
 
-    /// Update linear terms from Riccati backward pass
+    /// Backward pass to update Ricatti variables
+    #[inline(never)]
     fn backward_pass(&mut self) {
         let s = &mut self.state;
         let c = &self.cache;
+
+        // Scratch vectors for zero-allocation, minimal copy operations
+        let mut u_scratch_vec = s.u_scratch.column_mut(0);
 
         // Handles this special case correctly.
         // This will be optimized away in the case they are different.
         if Hu == Hx {
             let i = Hu - 1;
-            let x_ricc_next = s.x_ricc.column(i);
-            let r_curr = s.u_cost.column(i);
-            s.u_ricc.set_column(i, &(c.RpBPBi * (s.B.transpose() * x_ricc_next + r_curr)));
+
+            // Update: u_ricc[i] = RpBPBi * (B^T * x_ricc[i] + u_cost[i])
+            s.Bt.mul_to(&s.x_ricc.column(i), &mut u_scratch_vec);
+            u_scratch_vec += &s.u_cost.column(i);
+            c.RpBPBi.mul_to(&u_scratch_vec, &mut s.u_ricc.column_mut(i));
         }
 
         // The backward pass integrates cost-to-go over the full prediction horizon Hx
@@ -344,83 +397,124 @@ where
 
             // Control action is only optimized up to Hu
             if i < Hu {
-                let r_curr = s.u_cost.column(i);
-                s.u_ricc.set_column(i, &(c.RpBPBi * (s.B.transpose() * x_ricc_next + r_curr)));
-                s.x_ricc.set_column(i, &(s.x_cost.column(i) + c.AmBKt * x_ricc_next - c.Klqr.transpose() * r_curr));
+                // Update: u_ricc[i] = RpBPBi * (B^T * x_ricc[i] + u_cost[i])
+                s.Bt.mul_to(&x_ricc_next, &mut u_scratch_vec);
+                u_scratch_vec += &s.u_cost.column(i);
+                c.RpBPBi.mul_to(&u_scratch_vec, &mut s.u_ricc.column_mut(i));
+
+                // Update: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i+1] + Klqr^T * u_cost[i]
+                c.AmBKt.mul_to(&x_ricc_next, &mut s.x_scratch.column_mut(0));
+                c.Klqrt.mul_to(&s.u_cost.column(i), &mut s.x_scratch.column_mut(1));
+                let mut x_ricc_vec = s.x_ricc.column_mut(i);
+                s.x_cost.column(i).add_to(&s.x_scratch.column(0), &mut x_ricc_vec);
+                x_ricc_vec -= &s.x_scratch.column(1);
+
             } else {
-                let r_curr = s.u_cost.column(Hu - 1);
-                s.x_ricc.set_column(i, &(s.x_cost.column(i) + c.AmBKt * x_ricc_next - c.Klqr.transpose() * r_curr));
+
+                // Update: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i+1] + Klqr^T * u_cost[Hu - 1]
+                c.Klqrt.mul_to(&s.u_cost.column(Hu - 1), &mut s.x_scratch.column_mut(1));
+                c.AmBKt.mul_to(&x_ricc_next, &mut s.x_scratch.column_mut(0));
+                let mut x_ricc_vec = s.x_ricc.column_mut(i);
+                s.x_cost.column(i).add_to(&s.x_scratch.column(0), &mut x_ricc_vec);
+                x_ricc_vec -= &s.x_scratch.column(1);
             }
         }
     }
 
     /// Use LQR feedback policy to roll out trajectory
-    fn forward_pass(&mut self, xnow: SVector<F, Nx>) {
+    #[inline(never)]
+    fn forward_pass(&mut self, mut xnow: SVector<F, Nx>) {
         let s = &mut self.state;
         let c = &self.cache;
+
+        let neg_Klqr = -c.Klqr;
 
         if let Some(sys) = s.sys {
             // Forward-pass with initial state
             s.u.set_column(0, &(-c.Klqr * xnow - s.u_ricc.column(0)));
-            s.x.set_column(0, &sys(xnow, s.u.column(0).clone_owned()));
+            s.x.set_column(0, &sys(xnow.as_view(), s.u.column(0)));
 
             // Roll out trajectory up to the control horizon Hu
             for i in 1..Hu {
                 s.u.set_column(i, &(-c.Klqr * s.x.column(i - 1) - s.u_ricc.column(i)));
-                s.x.set_column(i, &sys(s.x.column(i - 1).clone_owned(), s.u.column(i).clone_owned()));
-            }
-
-            // For the rest of the prediction horizon (Hx), hold the last control input constant
-            let u_final = s.u.column(Hu - 1).clone_owned();
-            for i in Hu..Hx {
-                s.x.set_column(i, &sys(s.x.column(i - 1).clone_owned(), u_final));
-            }
-        } else {
-            // Forward-pass with initial state
-            s.u.set_column(0, &(-c.Klqr * xnow - s.u_ricc.column(0)));
-            s.x.set_column(0, &(s.A * xnow + s.B * s.u.column(0)));
-
-            // Roll out trajectory up to the control horizon Hu
-            for i in 1..Hu {
-                s.u.set_column(i, &(-c.Klqr * s.x.column(i - 1) - s.u_ricc.column(i)));
-                s.x.set_column(i, &(s.A * s.x.column(i - 1) + s.B * s.u.column(i)));
+                s.x.set_column(i, &sys(s.x.column(i - 1), s.u.column(i)));
             }
 
             // For the rest of the prediction horizon (Hx), hold the last control input constant
             let u_final = s.u.column(Hu - 1);
             for i in Hu..Hx {
-                s.x.set_column(i, &(s.A * s.x.column(i - 1) + s.B * u_final));
+                s.x.set_column(i, &sys(s.x.column(i - 1), u_final));
+            }
+        } else {
+            // Forward-pass of u[0] with initial state x[0]
+            let mut u_col = s.u.column_mut(0);
+            neg_Klqr.mul_to(&xnow, &mut u_col);
+            u_col -= &s.u_ricc.column(0);
+
+            // Forward-pass of x[1] with initial state x[0] and u[0]
+            let mut x_col = s.x.column_mut(0);
+            s.A.mul_to(&xnow, &mut x_col);
+            x_col.gemm(F::one(), &s.B, &u_col, F::one());
+
+            // Roll out trajectory up to the control horizon Hu
+            for i in 1..Hu {
+
+                xnow.copy_from(&s.x.column(i-1).clone_owned());
+
+                // Forward-pass of u[i] with state x[i]
+                let mut u_col = s.u.column_mut(i);
+                neg_Klqr.mul_to(&xnow, &mut u_col);
+                u_col -= &s.u_ricc.column(i);
+
+                // Forward-pass of x[i + 1] with state x[i] and u[i]
+                let mut x_col = s.x.column_mut(i);
+                s.A.mul_to(&xnow, &mut x_col);
+                x_col.gemm(F::one(), &s.B, &u_col, F::one());
+            }
+
+            // Roll out rest of trajectory keeping u constant
+            let u_final = s.u.column(Hu - 1);
+            for i in Hu..Hx {
+                
+                xnow.copy_from(&s.x.column(i-1).clone_owned());
+                
+                // Forward-pass of x[i + 1] with state x[i] and u[Hu - 1]
+                let mut x_col = s.x.column_mut(i);
+                s.A.mul_to(&xnow, &mut x_col);
+                x_col.gemm(F::one(), &s.B, &u_final, F::one());
             }
         }
     }
 
     /// Project slack variables into their feasible domain and update dual variables
+    #[inline(never)]
     fn update_constraints(&mut self,
         xcon: &mut [&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>],
         ucon: &mut [&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>],
     ) {
+        let update_res = self.should_calculate_residuals();
         let s = &mut self.state;
 
         for con in xcon {
-            con.constrain(&s.x);
+            con.constrain(s.x.as_view(), s.x_scratch.as_view_mut(), update_res);
         }
 
         for con in ucon {
-            con.constrain(&s.u);
+            con.constrain(s.u.as_view(), s.u_scratch.as_view_mut(), update_res);
         }
     }
 
     /// Check for termination condition by evaluating residuals
+    #[inline(never)]
     fn check_termination(
         &mut self,
         xcon: &[&mut Constraint<F, impl Project<F, Nx, Hx>, Nx, Hx>],
         ucon: &[&mut Constraint<F, impl Project<F, Nu, Hu>, Nu, Hu>],
     ) -> bool {
-        let s = &mut self.state;
         let c = &self.cache;
         let cfg = &self.config;
 
-        if s.iter % cfg.do_check != 0 {
+        if !self.should_calculate_residuals() {
             return false
         }
 

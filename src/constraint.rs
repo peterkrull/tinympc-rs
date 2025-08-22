@@ -1,18 +1,18 @@
-use nalgebra::{RealField, SMatrix, SVector};
+use nalgebra::{RealField, SMatrix, SMatrixView, SMatrixViewMut, SVector, Unit};
 
 pub trait Project<T, const N: usize, const H: usize> {
     /// Applies the projection to a series of points, modifying them in place
-    fn project(&self, points: &mut SMatrix<T, N, H>);
+    fn project(&self, points: SMatrixViewMut<T, N, H>);
 }
 
 impl <T, const N: usize, const H: usize> Project<T, N, H> for &dyn Project<T, N, H> {
-    fn project(&self, points: &mut SMatrix<T, N, H>) {
+    fn project(&self, points: SMatrixViewMut<T, N, H>) {
         (**self).project(points);
     }
 }
 
 impl <P: Project<T, N, H>, T, const N: usize, const H: usize> Project<T, N, H> for &P  {
-    fn project(&self, points: &mut SMatrix<T, N, H>) {
+    fn project(&self, points: SMatrixViewMut<T, N, H>) {
         (**self).project(points);
     }
 }
@@ -36,12 +36,12 @@ pub trait ProjectExt<T: RealField + Copy, const N: usize, const H: usize>: Proje
 impl <S: Project<T, N, H>, T: RealField + Copy, const N: usize, const H: usize> ProjectExt<T, N, H> for S {}
 
 /// Simple box constraint that is constant throughout the horizon.
-pub struct BoxFixed<T, const N: usize> {
+pub struct Box<T, const N: usize> {
     pub lower: SVector<Option<T>, N>,
     pub upper: SVector<Option<T>, N>,
 }
 
-impl <T: RealField, const N: usize> BoxFixed<T, N> {
+impl <T: RealField, const N: usize> Box<T, N> {
     /// Construct a new unconstrained `BoxProjection` that is 
     pub fn new() -> Self {
         Self {
@@ -65,22 +65,82 @@ impl <T: RealField, const N: usize> BoxFixed<T, N> {
     }
 }
 
-impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for BoxFixed<T, N> {
-    fn project(&self, points: &mut SMatrix<T, N, H>) {
-        for n in 0..N {
+impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Box<T, N> {
+    fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+        for h in 0..H {
+            let mut column = points.column_mut(h);
+            for n in 0..N {
+                column[n] = match (self.lower[n], self.upper[n]) {
+                    (Some(min), Some(max)) => column[n].clamp(min, max),
+                    (Some(min), None) => column[n].max(min),
+                    (None, Some(max)) => column[n].min(max),
+                    (None, None) => continue,
+                };
+            }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct Sphere<T, const N: usize> {
+    pub center: SVector<Option<T>, N>,
+    pub radius: T,
+}
+
+impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Sphere<T, N> {
+    fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+        for h in 0..H {
+            let mut point = points.column_mut(h);
             
-            if self.lower[n].is_none() && self.upper[n].is_none() {
-                continue
+            // Compute squared distance only for dimensions with defined centers
+            let mut squared_dist = T::zero();
+            let mut has_constraint = false;
+            
+            for n in 0..N {
+                if let Some(center) = self.center[n] {
+                    has_constraint = true;
+                    let diff = point[n] - center;
+                    squared_dist += diff * diff;
+                }
             }
             
-            let mut row_n = points.row_mut(n);
+            // If no dimensions are constrained or point is within radius, skip
+            if !has_constraint || squared_dist <= self.radius * self.radius {
+                continue;
+            }
+            
+            // Calculate scaling factor for projection
+            let dist = squared_dist.sqrt();
+            let scale = self.radius / dist;
+            
+            // Apply scaling only to dimensions with defined centers
+            for n in 0..N {
+                if let Some(center) = self.center[n] {
+                    let diff = point[n] - center;
+                    point[n] = center + diff * scale;
+                }
+            }
+        }
+    }
+}
 
-            row_n.apply(|x| *x = match (self.lower[n], self.upper[n]) {
-                (Some(min), Some(max)) => x.clamp(min, max),
-                (Some(min), None) => x.max(min),
-                (None, Some(max)) => x.min(max),
-                (None, None) => unreachable!("What in the dog garn"),
-            });
+#[derive(Debug, Copy, Clone)]
+pub struct HalfSpace<T, const N: usize> {
+    pub center: SVector<T, N>,
+    pub normal: Unit<SVector<T, N>>,
+}
+
+impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for HalfSpace<T, N> {
+    fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+        for h in 0..H {
+            let mut point = points.column_mut(h);
+
+            let centered = &point - &self.center;
+            let dot = centered.dot(&self.normal);
+
+            if dot < T::zero() {
+                point -= self.normal.scale(dot)
+            }
         }
     }
 }
@@ -98,8 +158,8 @@ pub struct Constraint<T, P: Project<T, N, H>, const N: usize, const H: usize> {
 impl <T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>> Constraint<T, P, N, H> {
     pub fn new(projector: P) -> Self {
         Self {
-            max_prim_residual: T::zero(),
-            max_dual_residual: T::zero(),
+            max_prim_residual: T::max_value().unwrap(),
+            max_dual_residual: T::max_value().unwrap(),
             slac: SMatrix::zeros(),
             dual: SMatrix::zeros(),
             projector,
@@ -128,20 +188,55 @@ impl <T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>> 
     }
 
     /// Constrains the set of points, and computes the maximum primal and dual residuals
-    pub fn constrain(&mut self, points: &SMatrix<T, N, H>) {
+    pub fn constrain2(&mut self, points: SMatrixView<T, N, H>) {
         let old_slac = self.slac.clone();
 
         self.slac = points + self.dual;
-        self.projector.project(&mut self.slac);
+        self.projector.project(self.slac.as_view_mut());
         let prim_residual_matrix = points - self.slac;
         self.dual += prim_residual_matrix;
 
         // Use infinity norm for simplicity and strictness
-        self.max_prim_residual = prim_residual_matrix.abs().sum();
-        self.max_dual_residual = (old_slac - self.slac).abs().sum();
+        self.max_prim_residual = prim_residual_matrix.abs().max();
+        self.max_dual_residual = (old_slac - self.slac).abs().max();
     }
 
-    pub fn add_cost(&self, cost: &mut SMatrix<T, N, H>) {
-        *cost += self.dual - self.slac;
+    /// Constrains the set of points, and computes the maximum primal and dual residuals
+    #[inline(never)]
+    pub fn constrain(&mut self, points: SMatrixView<T, N, H>, mut scratch: SMatrixViewMut<T, N, H>, update_res: bool) {
+        if update_res {
+            // Save old slac variables for computing dual residual
+            scratch.copy_from(&self.slac);
+        }
+        
+        // Slack update: slac' = point + dual;
+        points.add_to(&self.dual, &mut self.slac);
+
+        self.projector.project(self.slac.as_view_mut());
+        
+        if update_res {
+            // Compute maximum absolute dual residual 
+            scratch -= &self.slac;
+            scratch.apply(|t|*t = t.abs());
+            self.max_dual_residual = scratch.max();
+        }
+
+        // Compute primal residual
+        points.sub_to(&self.slac, &mut scratch);
+        
+        // Update dual parameters 
+        self.dual += &scratch;
+
+        if update_res {
+            // Find maximum absolute primal residual
+            scratch.apply(|t|*t = t.abs());
+            self.max_prim_residual = scratch.max();
+        }
     }
+
+    pub fn add_cost(&mut self, mut cost: SMatrixViewMut<T, N, H>, mut scratch: SMatrixViewMut<T, N, H>) {
+        self.dual.sub_to(&self.slac, &mut scratch);
+        cost += &scratch;
+    }
+
 }
