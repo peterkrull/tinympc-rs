@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use nalgebra::{matrix, vector, SMatrix, SVector, SVectorView};
 use rerun::Color;
-use tinympc_rs::{constraint::{Box, Project as _, ProjectExt as _, Sphere}, rho_cache::{LookupCache, SingleCache}, Error, TinyMpc};
+use tinympc_rs::{constraint::{Project as _, ProjectExt as _, Sphere}, Error, TinyMpc};
 
 const HX: usize = 200;
 const HU: usize = HX - 10;
@@ -54,8 +54,8 @@ fn sys(x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) -> SVector<f32, NX> {
 }
 
 pub static Q: SVector<f32, NX> = vector! {100., 100., 100., 0., 0., 0., 0., 0., 0.};
-pub static R: SVector<f32, NU> = vector! {25.0, 25.0, 25.0};
-pub static RHO: f32 = 4.;
+pub static R: SVector<f32, NU> = vector! {5.0, 5.0, 5.0};
+pub static RHO: f32 = 50.;
 
 fn main() -> Result<(), Error> {
 
@@ -63,13 +63,13 @@ fn main() -> Result<(), Error> {
         .spawn()
         .unwrap();
 
-    // type Cache = LookupCache<f32, NX, NU, 7>;
-    type Cache = SingleCache<f32, NX, NU>;
+    // type Cache = tinympc_rs::rho_cache::LookupCache<f32, NX, NU, 7>;
+    type Cache = tinympc_rs::rho_cache::SingleCache<f32, NX, NU>;
     type Mpc = TinyMpc::<f32, Cache, NX, NU, HX, HU>;
 
     let mut mpc = Mpc::new(A, B, Q, R, RHO)?;
-    mpc.config.max_iter = 200;
-    mpc.config.do_check = 4;
+    mpc.config.max_iter = 10;
+    mpc.config.do_check = 5;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 
