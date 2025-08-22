@@ -2,7 +2,7 @@ use nalgebra::{matrix, vector, SMatrix, SVector, SVectorView};
 use rerun::Color;
 use tinympc_rs::{constraint::{Box, Project as _, ProjectExt as _, Sphere}, Error};
 
-const HX: usize = 140;
+const HX: usize = 150;
 const HU: usize = HX - 5;
 
 const NX: usize = 9;
@@ -53,7 +53,7 @@ fn sys(x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) -> SVector<f32, NX> {
 
 pub static Q: SVector<f32, NX> = vector! {200., 200., 200., 0., 0., 0., 0., 0., 0.};
 pub static R: SVector<f32, NU> = vector! {5.0, 5.0, 5.0};
-pub static RHO: f32 = 5.0;
+pub static RHO: f32 = 50.0;
 
 fn main() -> Result<(), Error> {
 
@@ -62,7 +62,7 @@ fn main() -> Result<(), Error> {
         .unwrap();
 
     let mut mpc = tinympc_rs::TinyMpc::<NX, NU, HX, HU, f32>::new(A, B, Q, R, RHO)?;
-    mpc.config.max_iter = 25;
+    mpc.config.max_iter = 10;
     mpc.config.do_check = 5;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
@@ -79,7 +79,7 @@ fn main() -> Result<(), Error> {
 
     let ucon_sphere = Sphere {
         center: vector![Some(0.0), Some(0.0), Some(0.0)],
-        radius: 2.5,
+        radius: 1.0,
     };
 
     let mut ucon = [&mut ucon_sphere.into_dyn_constraint()];
@@ -250,9 +250,18 @@ fn main() -> Result<(), Error> {
 
         let vec = mpc.get_x_at(0);
         rec.log(
-            "ed_point",
+            "position",
             &rerun::Points3D::new([[vec[0] as f32, vec[1] as f32, vec[2] as f32]])
-                .with_radii([0.1]),
+                .with_radii([0.2]),
+        )
+        .unwrap();
+
+
+        let vec = xref.column(0);
+        rec.log(
+            "desired position",
+            &rerun::Points3D::new([[vec[0] as f32, vec[1] as f32, vec[2] as f32]])
+                .with_radii([0.2]),
         )
         .unwrap();
 

@@ -61,12 +61,6 @@ pub struct Cache<const Nx: usize, const Nu: usize, F> {
     /// Penalty-parameter for this cache
     rho: F,
 
-    /// Augmented state penalty vector
-    Q_aug: SVector<F, Nx>,
-
-    /// Augmented input penalty vector
-    R_aug: SVector<F, Nu>,
-
     /// Infinite-time horizon LQR gain
     Klqr: SMatrix<F, Nu, Nx>,
 
@@ -108,11 +102,8 @@ where
             return Err(Error::RNotPositiveDefinite);
         }
 
-        let Q_aug = Q.add_scalar(rho);
-        let R_aug = R.add_scalar(rho);
-
-        let Q_diag = SMatrix::from_diagonal(&Q_aug);
-        let R_diag = SMatrix::from_diagonal(&R_aug);
+        let Q_diag = SMatrix::from_diagonal(&Q.add_scalar(rho));
+        let R_diag = SMatrix::from_diagonal(&R.add_scalar(rho));
 
         let mut Klqr = SMatrix::zeros();
         let mut Plqr = Q_diag.clone_owned();
@@ -136,8 +127,6 @@ where
             .all(|x| x.is_finite())
             .then(|| Cache {
                 rho,
-                Q_aug,
-                R_aug,
                 Klqr,
                 Klqrt,
                 Plqr,
@@ -164,6 +153,12 @@ pub struct State<const Nx: usize, const Nu: usize, const Hx: usize, const Hu: us
     A: SMatrix<F, Nx, Nx>,
     B: SMatrix<F, Nx, Nu>,
     Bt: SMatrix<F, Nu, Nx>,
+
+    /// State tracking error penalty vector
+    Q: SVector<F, Nx>,
+
+    /// Input tracking error penalty vector
+    R: SVector<F, Nu>,
 
     /// In case A and B are sparse, a function doing the
     /// `x' <- A*x + B*u` calculation manually is likely faster.
@@ -203,7 +198,7 @@ where
         rho: F,
     ) -> Result<Self, Error> {
         // Guard against invalid horizon lengths
-        if Hx < Hu || Hu == 0 {
+        if Hx <= Hu || Hu == 0 {
             return Err(Error::InvalidHorizonLengths);
         }
 
@@ -218,6 +213,8 @@ where
             state: State {
                 A,
                 B,
+                Q,
+                R,
                 Bt: B.transpose(),
                 sys: None,
                 x: SMatrix::zeros(),
@@ -353,14 +350,14 @@ where
         if let Some(xref) = xref {
             for i in 0..Hx {
                 let mut x_cost_col = s.x_cost.column_mut(i);
-                x_cost_col -= &xref.column(i).component_mul(&c.Q_aug);
+                x_cost_col -= &xref.column(i).component_mul(&s.Q);
             }
         }
         
         if let Some(uref) = uref {
             for i in 0..Hu {
                 let mut u_cost_col = s.u_cost.column_mut(i);
-                u_cost_col -= &uref.column(i).component_mul(&c.R_aug);
+                u_cost_col -= &uref.column(i).component_mul(&s.R);
             }
         }
 
@@ -382,11 +379,11 @@ where
 
         // Handles this special case correctly.
         // This will be optimized away in the case they are different.
-        if Hu == Hx {
+        if Hu == Hx - 1 {
             let i = Hu - 1;
 
-            // Update: u_ricc[i] = RpBPBi * (B^T * x_ricc[i] + u_cost[i])
-            s.Bt.mul_to(&s.x_ricc.column(i), &mut u_scratch_vec);
+            // Update: u_ricc[i] = RpBPBi * (B^T * x_ricc[i + 1] + u_cost[i])
+            s.Bt.mul_to(&s.x_ricc.column(i + 1), &mut u_scratch_vec);
             u_scratch_vec += &s.u_cost.column(i);
             c.RpBPBi.mul_to(&u_scratch_vec, &mut s.u_ricc.column_mut(i));
         }
@@ -397,7 +394,7 @@ where
 
             // Control action is only optimized up to Hu
             if i < Hu {
-                // Update: u_ricc[i] = RpBPBi * (B^T * x_ricc[i] + u_cost[i])
+                // Update: u_ricc[i] = RpBPBi * (B^T * x_ricc[i + 1] + u_cost[i])
                 s.Bt.mul_to(&x_ricc_next, &mut u_scratch_vec);
                 u_scratch_vec += &s.u_cost.column(i);
                 c.RpBPBi.mul_to(&u_scratch_vec, &mut s.u_ricc.column_mut(i));
@@ -412,8 +409,8 @@ where
             } else {
 
                 // Update: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i+1] + Klqr^T * u_cost[Hu - 1]
-                c.Klqrt.mul_to(&s.u_cost.column(Hu - 1), &mut s.x_scratch.column_mut(1));
                 c.AmBKt.mul_to(&x_ricc_next, &mut s.x_scratch.column_mut(0));
+                c.Klqrt.mul_to(&s.u_cost.column(Hu - 1), &mut s.x_scratch.column_mut(1));
                 let mut x_ricc_vec = s.x_ricc.column_mut(i);
                 s.x_cost.column(i).add_to(&s.x_scratch.column(0), &mut x_ricc_vec);
                 x_ricc_vec -= &s.x_scratch.column(1);
@@ -426,8 +423,6 @@ where
     fn forward_pass(&mut self, mut xnow: SVector<F, Nx>) {
         let s = &mut self.state;
         let c = &self.cache;
-
-        let neg_Klqr = -c.Klqr;
 
         if let Some(sys) = s.sys {
             // Forward-pass with initial state
@@ -446,40 +441,33 @@ where
                 s.x.set_column(i, &sys(s.x.column(i - 1), u_final));
             }
         } else {
-            // Forward-pass of u[0] with initial state x[0]
-            let mut u_col = s.u.column_mut(0);
-            neg_Klqr.mul_to(&xnow, &mut u_col);
-            u_col -= &s.u_ricc.column(0);
 
-            // Forward-pass of x[1] with initial state x[0] and u[0]
-            let mut x_col = s.x.column_mut(0);
-            s.A.mul_to(&xnow, &mut x_col);
-            x_col.gemm(F::one(), &s.B, &u_col, F::one());
+            s.x.set_column(0, &xnow);
 
             // Roll out trajectory up to the control horizon Hu
-            for i in 1..Hu {
+            for i in 0..Hu {
 
-                xnow.copy_from(&s.x.column(i-1).clone_owned());
+                xnow.copy_from(&s.x.column(i));
 
                 // Forward-pass of u[i] with state x[i]
                 let mut u_col = s.u.column_mut(i);
-                neg_Klqr.mul_to(&xnow, &mut u_col);
+                c.Klqr.mul_to(&-xnow, &mut u_col);
                 u_col -= &s.u_ricc.column(i);
 
                 // Forward-pass of x[i + 1] with state x[i] and u[i]
-                let mut x_col = s.x.column_mut(i);
+                let mut x_col = s.x.column_mut(i + 1);
                 s.A.mul_to(&xnow, &mut x_col);
                 x_col.gemm(F::one(), &s.B, &u_col, F::one());
             }
 
             // Roll out rest of trajectory keeping u constant
             let u_final = s.u.column(Hu - 1);
-            for i in Hu..Hx {
+            for i in Hu..Hx - 1 {
                 
-                xnow.copy_from(&s.x.column(i-1).clone_owned());
+                xnow.copy_from(&s.x.column(i));
                 
                 // Forward-pass of x[i + 1] with state x[i] and u[Hu - 1]
-                let mut x_col = s.x.column_mut(i);
+                let mut x_col = s.x.column_mut(i + 1);
                 s.A.mul_to(&xnow, &mut x_col);
                 x_col.gemm(F::one(), &s.B, &u_final, F::one());
             }
