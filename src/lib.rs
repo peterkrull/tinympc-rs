@@ -1,4 +1,4 @@
-// #![no_std]
+#![no_std]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -34,7 +34,9 @@ pub enum Error {
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TerminationReason {
+    /// The solver converged to within the defined tolerances
     Converged,
+    /// The solver reached the maximum number of iterations allowed
     MaxIters,
 }
 
@@ -65,16 +67,6 @@ pub struct Config<T> {
 
     /// Number of iterations between evaluating convergence (default 5)
     pub do_check: usize,
-}
-
-macro_rules! timed {
-    ($description:literal $($token:tt)+) => {
-        // let time = embassy_time::Instant::now();
-        $($token)+
-        // let elapsed = time.elapsed();
-        // defmt::info!("Elapsed: {} us :: ({})", elapsed.as_micros(), $description);
-        // embassy_time::Timer::after_micros(500).await;
-    };
 }
 
 #[derive(Debug)]
@@ -168,7 +160,7 @@ where
     #[inline(never)]
     pub fn solve(
         &mut self,
-        xnow: SVector<T, Nx>,
+        mut xnow: SVector<T, Nx>,
         xref: Option<SMatrixView<'_, T, Nx, Hx>>,
         uref: Option<SMatrixView<'_, T, Nu, Hu>>,
         xcon: Option<&mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>]>,
@@ -176,41 +168,23 @@ where
     ) -> (TerminationReason, SVector<T, Nu>) {
         let mut reason = TerminationReason::MaxIters;
 
-        let mut xcon = xcon.unwrap_or(&mut [][..]);
-        let mut ucon = ucon.unwrap_or(&mut [][..]);
+        let xcon = xcon.unwrap_or(&mut [][..]);
+        let ucon = ucon.unwrap_or(&mut [][..]);
 
-        // Better warm-starting of dual variables from prior solution
-        timed! {
-            "shift constraint variables"
-            self.shift_constraint_variables(&mut xcon, &mut ucon);
-        }
+        self.warm_start(xcon, ucon);
 
-        // Iteratively solve MPC problem
+        self.state.x.set_column(0, &xnow);
+
         self.state.iter = 0;
         while self.state.iter < self.config.max_iter {
-            // defmt::debug!("Iteration number: {}", self.state.iter);
+            self.update_cost(xref, uref, xcon, ucon);
 
-            timed! {
-                "Update linear control cost terms"
-                self.update_cost(xref, uref, xcon, ucon);
-            }
+            self.backward_pass();
 
-            timed! {
-                "Backward pass to update Ricatti variables"
-                self.backward_pass();
-            }
+            self.forward_pass(&mut xnow);
 
-            timed! {
-                "Roll out to get new trajectory"
-                self.forward_pass(xnow);
-            }
+            self.update_constraints(xcon, ucon);
 
-            timed! {
-                "Project into feasible domain"
-                self.update_constraints(xcon, ucon);
-            }
-
-            // Check for early-stop condition
             if self.check_termination(xcon, ucon) {
                 reason = TerminationReason::Converged;
                 self.state.iter += 1;
@@ -228,23 +202,40 @@ where
     }
 
     /// Shift the dual variables by one time step for more accurate hot starting
-    #[inline(never)]
-    fn shift_constraint_variables(
+    #[inline(always)]
+    fn warm_start(
         &mut self,
         xcon: &mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
         ucon: &mut [&mut Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
+        /// Does copying in as large chunks as possible. Last two columns will be identical
+        fn left_shift_matrix<F, const ROWS: usize, const COLS: usize>(
+            matrix: &mut SMatrix<F, ROWS, COLS>,
+        ) {
+            if COLS > 1 {
+                let element_count = ROWS * (COLS - 1);
+                let ptr = matrix.as_mut_slice().as_mut_ptr();
+
+                unsafe {
+                    core::ptr::copy(ptr.add(ROWS), ptr, element_count);
+                }
+            }
+        }
+
         for con in xcon {
-            con.time_shift_variables();
+            left_shift_matrix(&mut con.dual);
         }
 
         for con in ucon {
-            con.time_shift_variables();
+            left_shift_matrix(&mut con.dual);
         }
+
+        left_shift_matrix(&mut self.state.x);
+        left_shift_matrix(&mut self.state.u);
     }
 
     /// Update linear control cost terms
-    #[inline(never)]
+    #[inline(always)]
     fn update_cost(
         &mut self,
         xref: Option<SMatrixView<T, Nx, Hx>>,
@@ -277,7 +268,7 @@ where
         // Extract ADMM cost term for Riccati terminal condition
         s.x_ricc.set_column(Hx - 1, &s.x_cost.column(Hx - 1));
 
-        // Add tracking cost for stages
+        // Add state tracking cost for stages
         if let Some(xref) = xref {
             for i in 0..Hx {
                 let mut x_cost_col = s.x_cost.column_mut(i);
@@ -285,6 +276,7 @@ where
             }
         }
 
+        // Add input tracking cost for stages
         if let Some(uref) = uref {
             for i in 0..Hu {
                 let mut u_cost_col = s.u_cost.column_mut(i);
@@ -300,7 +292,7 @@ where
     }
 
     /// Backward pass to update Ricatti variables
-    #[inline(never)]
+    #[inline(always)]
     fn backward_pass(&mut self) {
         let s = &mut self.state;
         let c = self.cache.get_active();
@@ -318,7 +310,6 @@ where
             u_scratch_vec += &s.u_cost.column(i);
             c.RpBPBi.mul_to(&u_scratch_vec, &mut s.u_ricc.column_mut(i));
         }
-
 
         // The backward pass integrates cost-to-go over the full prediction horizon Hx
         for i in (0..Hx - 1).rev() {
@@ -355,18 +346,16 @@ where
     }
 
     /// Use LQR feedback policy to roll out trajectory
-    #[inline(never)]
-    fn forward_pass(&mut self, mut xnow: SVector<T, Nx>) {
+    #[inline(always)]
+    fn forward_pass(&mut self, xnow: &mut SVector<T, Nx>) {
         let s = &mut self.state;
         let c = self.cache.get_active();
 
         s.x.set_column(0, &xnow);
 
         if let Some(sys) = s.sys {
-
             // Roll out trajectory up to the control horizon (Hu)
             for i in 0..Hu {
-
                 // Calc :: u[i] = -K * x[i] + u_ricc[i]
                 let mut u_col = s.u.column_mut(i);
                 c.negKlqr.mul_to(&s.x.column(i), &mut u_col);
@@ -379,12 +368,10 @@ where
             // Roll out rest of trajectory keeping u constant
             let u_final = s.u.column(Hu - 1);
             for i in Hu..Hx {
-
                 // Calc :: x[i+1] = A * x[i] +  B * u[Hu - 1]
                 s.x.set_column(i, &sys(s.x.column(i - 1), u_final));
             }
         } else {
-
             // Roll out trajectory up to the control horizon Hu
             for i in 0..Hu {
                 xnow.copy_from(&s.x.column(i));
@@ -414,7 +401,7 @@ where
     }
 
     /// Project slack variables into their feasible domain and update dual variables
-    #[inline(never)]
+    #[inline(always)]
     fn update_constraints(
         &mut self,
         xcon: &mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
@@ -433,7 +420,7 @@ where
     }
 
     /// Check for termination condition by evaluating residuals
-    #[inline(never)]
+    #[inline(always)]
     fn check_termination(
         &mut self,
         xcon: &mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
@@ -468,8 +455,6 @@ where
                 .cache
                 .update_active(max_prim_residual, max_dual_residual)
             {
-                println!("Switching to cache: rho = {}", self.cache.get_active().rho);
-
                 for con in xcon.iter_mut() {
                     con.rescale_dual(scalar)
                 }

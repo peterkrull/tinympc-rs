@@ -1,4 +1,4 @@
-use nalgebra::{convert, RealField, SMatrix, SMatrixView, SMatrixViewMut, SVector, Unit};
+use nalgebra::{RealField, SMatrix, SMatrixView, SMatrixViewMut, SVector, Unit, convert};
 
 /// Can project a series of points into their feasible region.
 pub trait Project<T, const N: usize, const H: usize> {
@@ -133,9 +133,9 @@ pub type DynConstraint<'a, F, const N: usize, const H: usize> =
 pub struct Constraint<T, P: Project<T, N, H>, const N: usize, const H: usize> {
     pub max_prim_residual: T,
     pub max_dual_residual: T,
-    slac: SMatrix<T, N, H>,
-    dual: SMatrix<T, N, H>,
-    projector: P,
+    pub(crate) slac: SMatrix<T, N, H>,
+    pub(crate) dual: SMatrix<T, N, H>,
+    pub(crate) projector: P,
 }
 
 impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
@@ -211,24 +211,5 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
     /// Re-scale the dual variables for when the value of rho has changed
     pub(crate) fn rescale_dual(&mut self, scalar: T) {
         self.dual.scale_mut(scalar);
-    }
-
-    /// Shifts dual variables forward by 1 time step.
-    /// Used at the beginning of a solve to hot-start the values.
-    pub(crate) fn time_shift_variables(&mut self) {
-        fn left_shift_matrix<F, const ROWS: usize, const COLS: usize>(
-            matrix: &mut SMatrix<F, ROWS, COLS>,
-        ) {
-            if COLS > 1 {
-                let element_count = ROWS * (COLS - 1);
-                let ptr = matrix.as_mut_slice().as_mut_ptr();
-
-                unsafe {
-                    core::ptr::copy(ptr.add(ROWS), ptr, element_count);
-                }
-            }
-        }
-
-        left_shift_matrix(&mut self.dual);
     }
 }

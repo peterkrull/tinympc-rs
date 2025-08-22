@@ -8,7 +8,7 @@ use tinympc_rs::{
 };
 
 const HX: usize = 100;
-const HU: usize = HX - 5;
+const HU: usize = HX - 15;
 
 const NX: usize = 9;
 const NU: usize = 3;
@@ -58,7 +58,7 @@ fn sys(x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) -> SVector<f32, NX> {
 }
 
 pub static Q: SVector<f32, NX> = vector! {5., 5., 5., 0., 0., 0., 0., 0., 0.};
-pub static R: SVector<f32, NU> = vector! {1., 1., 1.};
+pub static R: SVector<f32, NU> = vector! {25., 25., 25.};
 pub static RHO: f32 = 1.0;
 
 fn main() -> Result<(), Error> {
@@ -66,12 +66,12 @@ fn main() -> Result<(), Error> {
         .spawn()
         .unwrap();
 
-    type Cache = tinympc_rs::rho_cache::LookupCache<f32, NX, NU, 7>;
+    type Cache = tinympc_rs::rho_cache::LookupCache<f32, NX, NU, 5>;
     // type Cache = tinympc_rs::rho_cache::SingleCache<f32, NX, NU>;
     type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
 
     let mut mpc = Mpc::new(A, B, Q, R, RHO)?.with_sys(sys);
-    mpc.config.max_iter = 50;
+    mpc.config.max_iter = 5;
     mpc.config.do_check = 2;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));

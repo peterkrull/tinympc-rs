@@ -11,9 +11,6 @@ authors = ["Peter Krull"]
 [dependencies]
 nalgebra = { version = "0.34.0", default-features = false, features = ["libm"] }
 
-embassy-time = { path = "../embassy/embassy-time" }
-defmt = "1.0.1"
-rerun = "0.24.0"
-
 [dev-dependencies]
 nalgebra = { version = "0.34.0", features = ["macros"] }
+rerun = "0.24.0"

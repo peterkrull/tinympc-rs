@@ -83,7 +83,7 @@ impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx
         }
 
         let Klqrt = Klqr.transpose();
-        let negKlqr = - Klqr;
+        let negKlqr = -Klqr;
 
         let RpBPBi = (R_diag + B.transpose() * Plqr * B)
             .try_inverse()
@@ -123,8 +123,6 @@ pub struct LookupCache<T, const Nx: usize, const Nu: usize, const NUM: usize> {
     caches: [SingleCache<T, Nx, Nu>; NUM],
 }
 
-use std::mem::MaybeUninit;
-
 /// Creates an array from a closure that can fail.
 ///
 /// If the closure returns `Err` for any element, this function will return that `Err`.
@@ -132,7 +130,8 @@ use std::mem::MaybeUninit;
 pub fn try_array_from_fn<T: Sized, E, const N: usize>(
     mut cb: impl FnMut(usize) -> Result<T, E>,
 ) -> Result<[T; N], E> {
-    // Create an uninitialized array of `MaybeUninit`.
+    use core::mem::MaybeUninit;
+
     let mut array = [const { MaybeUninit::<T>::uninit() }; N];
 
     for i in 0..N {
@@ -185,7 +184,6 @@ where
             let diff = index as i32 - active_index as i32;
             let expo = convert::<f64, T>(1.6).powf(convert(diff as f64));
             let rho = central_rho * expo;
-            println!("Creating cache for rho {rho}, at index {index} (expo {expo})");
             SingleCache::new(rho, iters, A, B, Q, R) // returns error
         })?;
 
