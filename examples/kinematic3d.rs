@@ -74,7 +74,7 @@ fn main() -> Result<(), Error> {
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 
-    let mut xnow = SVector::zeros();
+    let mut x_now = SVector::zeros();
     let mut xref = SMatrix::<f32, NX, HX>::zeros();
 
     #[rustfmt::skip]
@@ -101,8 +101,8 @@ fn main() -> Result<(), Error> {
         radius: 10.0,
     };
 
-    let mut xcon = [x_projector_bundle.constraint()];
-    let mut ucon = [u_projector_sphere.constraint()];
+    let mut x_con = [x_projector_bundle.constraint()];
+    let mut u_con = [u_projector_sphere.constraint()];
 
     let mut true_pos = vec![vector![0.0, 0.0, 0.0]];
 
@@ -130,16 +130,16 @@ fn main() -> Result<(), Error> {
 
         let time = std::time::Instant::now();
 
-        let (reason, mut unow) = mpc
-            .initial_condition(xnow)
-            .u_constraints(ucon.as_mut())
-            .x_constraints(xcon.as_mut())
+        let (reason, mut u_now) = mpc
+            .initial_condition(x_now)
+            .u_constraints(u_con.as_mut())
+            .x_constraints(x_con.as_mut())
             .x_reference(xref.as_view())
             .solve();
 
         println!(
             "Got solution: {:?} in {} ms)",
-            unow.as_slice(),
+            u_now.as_slice(),
             time.elapsed().as_micros() as f32 / 1e3
         );
 
@@ -157,8 +157,8 @@ fn main() -> Result<(), Error> {
         }
 
         // Apply input to system
-        u_projector_sphere.project(unow.as_view_mut());
-        xnow = A * xnow + B * unow;
+        u_projector_sphere.project(u_now.as_view_mut());
+        x_now = A * x_now + B * u_now;
 
         // ------ RERUN VISUALIZATION -------
 
@@ -265,7 +265,7 @@ fn main() -> Result<(), Error> {
         let strips = rerun::LineStrips2D::new([x_x, x_y, x_z]);
         rec.log("xref_strips", &strips).unwrap();
 
-        let x = xnow;
+        let x = x_now;
 
         let vec = mpc.get_x_matrix().column(0);
         rec.log(

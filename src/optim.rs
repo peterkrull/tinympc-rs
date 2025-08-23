@@ -28,8 +28,8 @@ pub(crate) fn column_pair_mut<'a, T: Scalar, const R: usize, const C: usize>(
     (Matrix::from_data(view0), Matrix::from_data(view1))
 }
 
-/// Does copying in as large chunks as possible. Last two columns will be identical
-pub(crate) fn left_shift_matrix<'a, T: Scalar, const R: usize, const C: usize>(
+/// Shifts all columns such that `column[i] <- column[i + 1]` with the last two being identical.
+pub(crate) fn shift_columns_left<'a, T: Scalar, const R: usize, const C: usize>(
     matrix: impl Into<SMatrixViewMut<'a, T, R, C>>,
 ) {
     if C > 1 {
@@ -46,7 +46,7 @@ pub(crate) fn left_shift_matrix<'a, T: Scalar, const R: usize, const C: usize>(
 ///
 /// If the closure returns `Err` for any element, this function will return that `Err`.
 /// All previously initialized elements will be properly dropped.
-pub fn try_array_from_fn<T: Sized, E, const N: usize>(
+pub(crate) fn try_array_from_fn<T: Sized, E, const N: usize>(
     mut cb: impl FnMut(usize) -> Result<T, E>,
 ) -> Result<[T; N], E> {
     use core::mem::MaybeUninit;
