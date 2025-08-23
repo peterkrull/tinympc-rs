@@ -194,6 +194,12 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
         }
     }
 
+    /// Get a mutable reference to the projector.
+    /// Allows for modifying or completely swapping the projector at runtime.
+    pub fn projector_mut(&mut self) -> &mut P {
+        &mut self.projector
+    }
+
     /// Reset all internal state of this constraint
     pub fn reset(&mut self) {
         self.max_prim_residual = convert(1e9);
