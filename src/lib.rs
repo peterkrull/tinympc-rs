@@ -247,7 +247,7 @@ where
 
     pub fn solve(
         &mut self,
-        mut xnow: SVector<T, Nx>,
+        xnow: SVector<T, Nx>,
         xref: Option<SMatrixView<T, Nx, Hx>>,
         uref: Option<SMatrixView<T, Nu, Hu>>,
         xcon: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
@@ -265,7 +265,7 @@ where
 
             self.backward_pass();
 
-            self.forward_pass(&mut xnow);
+            self.forward_pass();
 
             self.update_constraints(xcon, ucon);
 
@@ -405,11 +405,9 @@ where
 
     /// Use LQR feedback policy to roll out trajectory
     #[inline]
-    fn forward_pass(&mut self, xnow: &mut SVector<T, Nx>) {
+    fn forward_pass(&mut self) {
         let s = &mut self.state;
         let c = self.cache.get_active();
-
-        s.x.set_column(0, xnow);
 
         if let Some(sys) = s.sys {
             // Roll out trajectory up to the control horizon (Hu)
