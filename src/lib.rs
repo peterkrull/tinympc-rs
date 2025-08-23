@@ -5,7 +5,7 @@
 use nalgebra::{RealField, SMatrix, SMatrixView, SVector, SVectorView, Scalar, convert};
 
 use crate::{
-    constraint::{Constraint, Project},
+    constraint::{Constraint, DynConstraint, Project},
     rho_cache::Cache,
 };
 
@@ -43,15 +43,15 @@ pub enum TerminationReason {
 #[derive(Debug)]
 pub struct TinyMpc<
     T,
-    C: rho_cache::Cache<T, Nx, Nu>,
+    CACHE: Cache<T, Nx, Nu>,
     const Nx: usize,
     const Nu: usize,
     const Hx: usize,
     const Hu: usize,
 > {
-    pub config: Config<T>,
-    cache: C,
+    cache: CACHE,
     state: State<T, Nx, Nu, Hx, Hu>,
+    pub config: Config<T>,
 }
 
 #[derive(Debug)]
@@ -102,12 +102,67 @@ pub struct State<T, const Nx: usize, const Nu: usize, const Hx: usize, const Hu:
     iter: usize,
 }
 
+pub struct Problem<
+    'a,
+    'b,
+    T,
+    CACHE,
+    const Nx: usize,
+    const Nu: usize,
+    const Hx: usize,
+    const Hu: usize,
+> where
+    T: Scalar + RealField + Copy,
+    CACHE: Cache<T, Nx, Nu>,
+{
+    mpc: &'a mut TinyMpc<T, CACHE, Nx, Nu, Hx, Hu>,
+    xnow: SVector<T, Nx>,
+    xref: Option<SMatrixView<'a, T, Nx, Hx>>,
+    uref: Option<SMatrixView<'a, T, Nu, Hu>>,
+    xcon: Option<&'a mut [DynConstraint<'b, T, Nx, Hx>]>,
+    ucon: Option<&'a mut [DynConstraint<'b, T, Nu, Hu>]>,
+}
+
+impl<'a, 'b, T, CACHE, const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize>
+    Problem<'a, 'b, T, CACHE, Nx, Nu, Hx, Hu>
+where
+    T: Scalar + RealField + Copy,
+    CACHE: Cache<T, Nx, Nu>,
+{
+    pub fn x_reference(mut self, xref: impl Into<SMatrixView<'a, T, Nx, Hx>>) -> Self {
+        self.xref = Some(xref.into());
+        self
+    }
+
+    pub fn u_reference(mut self, uref: impl Into<SMatrixView<'a, T, Nu, Hu>>) -> Self {
+        self.uref = Some(uref.into());
+        self
+    }
+
+    pub fn x_constraints(mut self, xcon: &'a mut [DynConstraint<'b, T, Nx, Hx>]) -> Self {
+        self.xcon = Some(xcon);
+        self
+    }
+
+    pub fn u_constraints(mut self, ucon: &'a mut [DynConstraint<'b, T, Nu, Hu>]) -> Self {
+        self.ucon = Some(ucon);
+        self
+    }
+
+    /// Run the TinyMPC solver
+    pub fn solve(mut self) -> (TerminationReason, SVector<T, Nu>) {
+        let xcon = self.xcon.take().unwrap_or(&mut [][..]);
+        let ucon = self.ucon.take().unwrap_or(&mut [][..]);
+        self.mpc.solve(self.xnow, self.xref, self.uref, xcon, ucon)
+    }
+}
+
 impl<T, C: Cache<T, Nx, Nu>, const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize>
     TinyMpc<T, C, Nx, Nu, Hx, Hu>
 where
     T: Scalar + RealField + Copy,
 {
-    #[must_use]
+    #[must_use = "Creatig a new TinyMpc type without assigning it does nothing"]
     pub fn new(
         A: SMatrix<T, Nx, Nx>,
         B: SMatrix<T, Nx, Nu>,
@@ -146,6 +201,20 @@ where
         })
     }
 
+    pub fn initial_condition<'b>(
+        &mut self,
+        xnow: SVector<T, Nx>,
+    ) -> Problem<'_, 'b, T, C, Nx, Nu, Hx, Hu> {
+        Problem {
+            mpc: self,
+            xnow,
+            xref: None,
+            uref: None,
+            xcon: None,
+            ucon: None,
+        }
+    }
+
     pub fn with_sys(mut self, sys: LtiFn<T, Nx, Nu>) -> Self {
         self.state.sys = Some(sys);
         self
@@ -154,15 +223,12 @@ where
     pub fn solve(
         &mut self,
         mut xnow: SVector<T, Nx>,
-        xref: Option<SMatrixView<'_, T, Nx, Hx>>,
-        uref: Option<SMatrixView<'_, T, Nu, Hu>>,
-        xcon: Option<&mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>]>,
-        ucon: Option<&mut [&mut Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>]>,
+        xref: Option<SMatrixView<T, Nx, Hx>>,
+        uref: Option<SMatrixView<T, Nu, Hu>>,
+        xcon: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
+        ucon: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) -> (TerminationReason, SVector<T, Nu>) {
         let mut reason = TerminationReason::MaxIters;
-
-        let xcon = xcon.unwrap_or(&mut [][..]);
-        let ucon = ucon.unwrap_or(&mut [][..]);
 
         self.warm_start(xcon, ucon);
 
@@ -198,8 +264,8 @@ where
     #[inline]
     fn warm_start(
         &mut self,
-        xcon: &mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
-        ucon: &mut [&mut Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
+        xcon: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
+        ucon: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
         /// Does copying in as large chunks as possible. Last two columns will be identical
         fn left_shift_matrix<F, const ROWS: usize, const COLS: usize>(
@@ -230,8 +296,8 @@ where
         &mut self,
         xref: Option<SMatrixView<T, Nx, Hx>>,
         uref: Option<SMatrixView<T, Nu, Hu>>,
-        xcon: &mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
-        ucon: &mut [&mut Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
+        xcon: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
+        ucon: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
         let s = &mut self.state;
         let c = self.cache.get_active();
@@ -358,7 +424,7 @@ where
         let s = &mut self.state;
         let c = self.cache.get_active();
 
-        s.x.set_column(0, &xnow);
+        s.x.set_column(0, xnow);
 
         if let Some(sys) = s.sys {
             // Roll out trajectory up to the control horizon (Hu)
@@ -385,12 +451,12 @@ where
 
                 // Calc :: u[i] = -K * x[i] + u_ricc[i]
                 let mut u_col = s.u.column_mut(i);
-                c.negKlqr.mul_to(&xnow, &mut u_col);
+                c.negKlqr.mul_to(xnow, &mut u_col);
                 u_col -= &s.u_ricc.column(i);
 
                 // Calc :: x[i+1] = A * x[i] +  B * u[i]
                 let mut x_col = s.x.column_mut(i + 1);
-                s.A.mul_to(&xnow, &mut x_col);
+                s.A.mul_to(xnow, &mut x_col);
                 x_col.gemm(T::one(), &s.B, &u_col, T::one());
             }
 
@@ -401,7 +467,7 @@ where
 
                 // Calc :: x[i+1] = A * x[i] +  B * u[Hu - 1]
                 let mut x_col = s.x.column_mut(i + 1);
-                s.A.mul_to(&xnow, &mut x_col);
+                s.A.mul_to(xnow, &mut x_col);
                 x_col.gemm(T::one(), &s.B, &u_final, T::one());
             }
         }
@@ -411,8 +477,8 @@ where
     #[inline]
     fn update_constraints(
         &mut self,
-        xcon: &mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
-        ucon: &mut [&mut Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
+        xcon: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
+        ucon: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
         let update_res = self.should_calculate_residuals();
         let s = &mut self.state;
@@ -435,8 +501,8 @@ where
     #[inline]
     fn check_termination(
         &mut self,
-        xcon: &mut [&mut Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
-        ucon: &mut [&mut Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
+        xcon: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
+        ucon: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) -> bool {
         let c = self.cache.get_active();
         let cfg = &self.config;
@@ -462,18 +528,17 @@ where
             max_prim_residual < cfg.prim_tol && max_dual_residual * c.rho < cfg.dual_tol;
 
         // Try to adapt rho
-        if !terminate {
-            if let Some(scalar) = self
+        if !terminate
+            && let Some(scalar) = self
                 .cache
                 .update_active(max_prim_residual, max_dual_residual)
-            {
-                for con in xcon.iter_mut() {
-                    con.rescale_dual(scalar)
-                }
+        {
+            for con in xcon.iter_mut() {
+                con.rescale_dual(scalar)
+            }
 
-                for con in ucon.iter_mut() {
-                    con.rescale_dual(scalar)
-                }
+            for con in ucon.iter_mut() {
+                con.rescale_dual(scalar)
             }
         }
 

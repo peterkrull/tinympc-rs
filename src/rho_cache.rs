@@ -95,7 +95,7 @@ impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx
             .chain(RpBPBi.iter())
             .chain(AmBKt.iter())
             .all(|x| x.is_finite())
-            .then(|| SingleCache {
+            .then_some(SingleCache {
                 rho,
                 negKlqr,
                 Klqrt,
@@ -144,10 +144,9 @@ pub fn try_array_from_fn<T: Sized, E, const N: usize>(
                 // If the closure fails, we must drop the elements that
                 // were already successfully initialized.
                 // The slice `0..i` contains all the initialized elements.
-                for j in 0..i {
-                    // Safety: We know elements 0..i have been initialized.
+                for element in array.iter_mut().take(i) {
                     unsafe {
-                        array[j].assume_init_drop();
+                        element.assume_init_drop();
                     }
                 }
                 // Return the error to the caller.
@@ -213,9 +212,7 @@ where
         }
 
         // If the value of rho changed we must also rescale all duals
-        let rescale = (prev_rho != cache.rho).then(|| prev_rho / cache.rho);
-
-        rescale
+        (prev_rho != cache.rho).then(|| prev_rho / cache.rho)
     }
 
     fn get_active(&self) -> &SingleCache<T, Nx, Nu> {

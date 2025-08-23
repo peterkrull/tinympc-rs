@@ -37,14 +37,14 @@ fn main() {
         upper: SVector::from_element(Some(5.0)),
     };
 
-    let mut x_constraints = [&mut DynConstraint::new(&xcon_box1)];
+    let mut x_constraints = [DynConstraint::new(&xcon_box1)];
 
     let ucon_box1 = Box {
         lower: SVector::from_element(Some(-0.4)),
         upper: SVector::from_element(Some(0.4)),
     };
 
-    let mut u_constraints = [&mut DynConstraint::new(&ucon_box1)];
+    let mut u_constraints = [DynConstraint::new(&ucon_box1)];
 
     let mut total_iters = 0;
     for k in 0..100 {
@@ -60,8 +60,8 @@ fn main() {
             x,
             Some(xref.as_view()),
             None,
-            Some(&mut x_constraints),
-            Some(&mut u_constraints),
+            x_constraints.as_mut(),
+            u_constraints.as_mut(),
         );
         println!(
             "At step {k:3} in {:4} iterations, got tracking error : {:05.4} - {:?} with u:{:?}",

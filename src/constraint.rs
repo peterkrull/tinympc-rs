@@ -97,7 +97,6 @@ pub struct Sphere<T, const N: usize> {
 
 impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Sphere<T, N> {
     fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
-
         // Special case, just snap the points to the center coordinate
         if self.radius.is_zero() {
             for h in 0..H {
@@ -108,7 +107,7 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for S
                     }
                 }
             }
-            return
+            return;
         }
 
         for h in 0..H {
@@ -158,7 +157,7 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for H
         for h in 0..H {
             let mut point = points.column_mut(h);
 
-            let centered = &point - &self.center;
+            let centered = &point - self.center;
             let dot = centered.dot(&self.normal);
 
             if dot < T::zero() {

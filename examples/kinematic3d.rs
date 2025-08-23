@@ -4,7 +4,8 @@ use nalgebra::{SMatrix, SVector, SVectorView, matrix, vector};
 use rerun::Color;
 use tinympc_rs::{
     Error, TinyMpc,
-    constraint::{Box, Project as _, ProjectExt as _, Sphere},
+    constraint::{Box, Constraint, Project, ProjectExt as _, Sphere},
+    rho_cache::LookupCache,
 };
 
 const HX: usize = 100;
@@ -66,8 +67,8 @@ fn main() -> Result<(), Error> {
         .spawn()
         .unwrap();
 
-    type Cache = tinympc_rs::rho_cache::LookupCache<f32, NX, NU, 5>;
-    // type Cache = tinympc_rs::rho_cache::SingleCache<f32, NX, NU>;
+    const NUM_CACHES: usize = 5;
+    type Cache = LookupCache<f32, NX, NU, NUM_CACHES>;
     type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
 
     let mut mpc = Mpc::new(A, B, Q, R, RHO)?.with_sys(sys);
@@ -91,20 +92,19 @@ fn main() -> Result<(), Error> {
         lower: vector![Some(-50.0), Some(-50.0), Some(-50.0), None, None, None, None, None, None],
     };
 
-    // Two (or more!) projectors can be used together, saving a pair of slack/dual variables.
+    // Two (or more!) projectors can be bundled together, saving a pair of slack/dual variables.
     // This should only be done if one constraint cannot immediately invalidate another constrant.
-    let x_projector = (x_project_sphere, x_project_box);
-    let mut xcon = x_projector.dyn_constraint();
+    let x_projector_bundle = (x_project_sphere, x_project_box);
 
-    let ucon_sphere = Sphere {
+    let u_projector_sphere = Sphere {
         center: vector![Some(0.0), Some(0.0), Some(0.0)],
         radius: 10.0,
     };
 
-    let ucon_sphere_dyn = &mut ucon_sphere.dyn_constraint();
-
-    let mut xcon = [&mut xcon];
-    let mut ucon = [ucon_sphere_dyn];
+    let mut xcon: [Constraint<f32, &dyn Project<f32, NX, HX>, NX, HX>; 1] =
+        [x_projector_bundle.dyn_constraint()];
+    let mut ucon: [Constraint<f32, &dyn Project<f32, NU, HU>, NU, HU>; 1] =
+        [u_projector_sphere.dyn_constraint()];
 
     let mut true_pos = vec![vector![0.0, 0.0, 0.0]];
 
@@ -131,13 +131,15 @@ fn main() -> Result<(), Error> {
         }
 
         let time = std::time::Instant::now();
-        let (reason, mut unow) = mpc.solve(
-            xnow,
-            Some(xref.as_view()),
-            None,
-            Some(&mut xcon),
-            Some(&mut ucon),
-        );
+
+        let problem = mpc
+            .initial_condition(xnow)
+            .u_constraints(&mut ucon)
+            .x_constraints(&mut xcon)
+            .x_reference(&xref);
+
+        let (reason, mut unow) = problem.solve();
+
         println!(
             "Got solution: {:?} in {} ms)",
             unow.as_slice(),
@@ -158,7 +160,7 @@ fn main() -> Result<(), Error> {
         }
 
         // Apply input to system
-        ucon_sphere.project(unow.as_view_mut());
+        u_projector_sphere.project(unow.as_view_mut());
         xnow = A * xnow + B * unow;
 
         // ------ RERUN VISUALIZATION -------
@@ -226,7 +228,7 @@ fn main() -> Result<(), Error> {
         let strips = rerun::LineStrips2D::new([x_x, x_y, x_z]);
         rec.log("x_vel_strips", &strips).unwrap();
 
-        x_projector.project(x_mat.as_view_mut());
+        x_projector_bundle.project(x_mat.as_view_mut());
 
         let x_iter = x_mat.column_iter().enumerate();
         let x_x = rerun::LineStrip2D::from_iter(
