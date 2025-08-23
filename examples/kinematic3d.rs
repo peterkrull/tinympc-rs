@@ -133,13 +133,12 @@ fn main() -> Result<(), Error> {
 
         let time = std::time::Instant::now();
 
-        let problem = mpc
+        let (reason, mut unow) = mpc
             .initial_condition(xnow)
             .u_constraints(ucon.as_mut())
             .x_constraints(xcon.as_mut())
-            .x_reference(xref.as_view());
-
-        let (reason, mut unow) = problem.solve();
+            .x_reference(xref.as_view())
+            .solve();
 
         println!(
             "Got solution: {:?} in {} ms)",
