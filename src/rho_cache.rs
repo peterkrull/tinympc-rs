@@ -27,8 +27,8 @@ pub struct SingleCache<T, const Nx: usize, const Nu: usize> {
     /// Penalty-parameter for this cache
     pub(crate) rho: T,
 
-    /// Negated infinite-time horizon LQR gain
-    pub(crate) negKlqr: SMatrix<T, Nu, Nx>,
+    /// Infinite-time horizon LQR gain
+    pub(crate) Klqr: SMatrix<T, Nu, Nx>,
 
     /// Transposed infinite-time horizon LQR gain
     pub(crate) Klqrt: SMatrix<T, Nx, Nu>,
@@ -82,13 +82,14 @@ impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx
             Plqr = A.transpose() * Plqr * A - A.transpose() * Plqr * B * Klqr + Q_diag;
         }
 
-        let Klqrt = Klqr.transpose();
-        let negKlqr = -Klqr;
-
         let RpBPBi = (R_diag + B.transpose() * Plqr * B)
             .try_inverse()
             .ok_or(INVERR)?;
         let AmBKt = (A - B * Klqr).transpose();
+
+        let Klqrt = -Klqr.transpose();
+        let Klqr = -Klqr;
+        let Plqr = -Plqr;
 
         // If RpBPBi and AmBKt are finite, so are all the other values
         ([].iter())
@@ -97,7 +98,7 @@ impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx
             .all(|x| x.is_finite())
             .then_some(SingleCache {
                 rho,
-                negKlqr,
+                Klqr,
                 Klqrt,
                 Plqr,
                 RpBPBi,
@@ -123,46 +124,6 @@ pub struct LookupCache<T, const Nx: usize, const Nu: usize, const NUM: usize> {
     caches: [SingleCache<T, Nx, Nu>; NUM],
 }
 
-/// Creates an array from a closure that can fail.
-///
-/// If the closure returns `Err` for any element, this function will return that `Err`.
-/// All previously initialized elements will be properly dropped.
-pub fn try_array_from_fn<T: Sized, E, const N: usize>(
-    mut cb: impl FnMut(usize) -> Result<T, E>,
-) -> Result<[T; N], E> {
-    use core::mem::MaybeUninit;
-
-    let mut array = [const { MaybeUninit::<T>::uninit() }; N];
-
-    for i in 0..N {
-        match cb(i) {
-            Ok(val) => {
-                // If the closure succeeds, write the value to the array.
-                array[i].write(val);
-            }
-            Err(e) => {
-                // If the closure fails, we must drop the elements that
-                // were already successfully initialized.
-                // The slice `0..i` contains all the initialized elements.
-                for element in array.iter_mut().take(i) {
-                    unsafe {
-                        element.assume_init_drop();
-                    }
-                }
-                // Return the error to the caller.
-                return Err(e);
-            }
-        }
-    }
-
-    // If the loop completes, all elements are initialized, and we can
-    // safely transition from `[MaybeUninit<T>; N]` to `[T; N]`.
-    // Safety: We've just initialized every element in the loop above.
-    let array = unsafe { array.map(|elem| elem.assume_init()) };
-
-    Ok(array)
-}
-
 impl<T, const Nx: usize, const Nu: usize, const NUM: usize> Cache<T, Nx, Nu>
     for LookupCache<T, Nx, Nu, NUM>
 where
@@ -179,7 +140,7 @@ where
         let threshold = convert(10.0);
         let active_index = NUM / 2;
 
-        let caches = try_array_from_fn(|index| {
+        let caches = crate::optim::try_array_from_fn(|index| {
             let diff = index as i32 - active_index as i32;
             let expo = convert::<f64, T>(1.6).powf(convert(diff as f64));
             let rho = central_rho * expo;

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use nalgebra::{SMatrix, SVector, SVectorView, matrix, vector};
+use nalgebra::{SMatrix, SVector, SVectorView, SVectorViewMut, matrix, vector};
 use rerun::Color;
 use tinympc_rs::{
     Error, TinyMpc,
@@ -43,19 +43,16 @@ pub static B: SMatrix<f32, NX, NU> = matrix![
     0., 0., (1. - LP);
 ];
 
-fn sys(x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) -> SVector<f32, NX> {
-    [
-        x[0] + x[3] * DT + x[6] * DD,
-        x[1] + x[4] * DT + x[7] * DD,
-        x[2] + x[5] * DT + x[8] * DD,
-        x[3] + x[6] * DT,
-        x[4] + x[7] * DT,
-        x[5] + x[8] * DT,
-        x[6] * LP + (1.0 - LP) * u[0],
-        x[7] * LP + (1.0 - LP) * u[1],
-        x[8] * LP + (1.0 - LP) * u[2],
-    ]
-    .into()
+fn sys(mut xnext: SVectorViewMut<f32, NX>, x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) {
+    xnext[0] = x[0] + x[3] * DT + x[6] * DD;
+    xnext[1] = x[1] + x[4] * DT + x[7] * DD;
+    xnext[2] = x[2] + x[5] * DT + x[8] * DD;
+    xnext[3] = x[3] + x[6] * DT;
+    xnext[4] = x[4] + x[7] * DT;
+    xnext[5] = x[5] + x[8] * DT;
+    xnext[6] = x[6] * LP + (1.0 - LP) * u[0];
+    xnext[7] = x[7] * LP + (1.0 - LP) * u[1];
+    xnext[8] = x[8] * LP + (1.0 - LP) * u[2];
 }
 
 pub static Q: SVector<f32, NX> = vector! {9., 9., 9., 0., 0., 0., 0., 0., 0.};

@@ -1,8 +1,12 @@
 #![no_std]
+#![allow(clippy::op_ref)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use nalgebra::{RealField, SMatrix, SMatrixView, SVector, SVectorView, Scalar, convert};
+
+use nalgebra::{
+    RealField, SMatrix, SMatrixView, SVector, SVectorView, SVectorViewMut, Scalar, convert,
+};
 
 use crate::{
     constraint::{Constraint, Project},
@@ -10,10 +14,11 @@ use crate::{
 };
 
 pub mod constraint;
+mod optim;
 pub mod rho_cache;
 
 pub type LtiFn<F, const Nx: usize, const Nu: usize> =
-    fn(SVectorView<F, Nx>, SVectorView<F, Nu>) -> SVector<F, Nx>;
+    fn(SVectorViewMut<F, Nx>, SVectorView<F, Nx>, SVectorView<F, Nu>);
 
 /// Errors that can occur during system setup
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -224,10 +229,7 @@ where
         })
     }
 
-    pub fn initial_condition(
-        &mut self,
-        xnow: SVector<T, Nx>,
-    ) -> Problem<'_, T, C, Nx, Nu, Hx, Hu> {
+    pub fn initial_condition(&mut self, xnow: SVector<T, Nx>) -> Problem<'_, T, C, Nx, Nu, Hx, Hu> {
         Problem {
             mpc: self,
             xnow,
@@ -290,26 +292,12 @@ where
         xcon: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
         ucon: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
-        /// Does copying in as large chunks as possible. Last two columns will be identical
-        fn left_shift_matrix<F, const ROWS: usize, const COLS: usize>(
-            matrix: &mut SMatrix<F, ROWS, COLS>,
-        ) {
-            if COLS > 1 {
-                let element_count = ROWS * (COLS - 1);
-                let ptr = matrix.as_mut_slice().as_mut_ptr();
-
-                unsafe {
-                    core::ptr::copy(ptr.add(ROWS), ptr, element_count);
-                }
-            }
-        }
-
         for con in xcon {
-            left_shift_matrix(&mut con.dual);
+            optim::left_shift_matrix(&mut con.dual);
         }
 
         for con in ucon {
-            left_shift_matrix(&mut con.dual);
+            optim::left_shift_matrix(&mut con.dual);
         }
     }
 
@@ -325,22 +313,11 @@ where
         let s = &mut self.state;
         let c = self.cache.get_active();
 
-        s.x_cost = SMatrix::<T, Nx, Hx>::zeros();
-        s.u_cost = SMatrix::<T, Nu, Hu>::zeros();
-
-        // The data in the prediction matrices is outdated and will be
-        // overwritten later this iteration. For now they can be used as
-        // a scratch buffer for temporary calculations.
-        let u_scratch = &mut s.u;
-        let x_scratch = &mut s.x;
-
         // Add cost contribution for state constraint violations
         let mut xcon_iter = xcon.iter_mut();
         if let Some(xcon_first) = xcon_iter.next() {
-            xcon_first.set_cost(s.x_cost.as_view_mut());
-            for con in xcon_iter {
-                con.add_cost(s.x_cost.as_view_mut(), x_scratch.as_view_mut());
-            }
+            xcon_first.set_cost(&mut s.x_cost);
+            xcon_iter.for_each(|con| con.add_cost(&mut s.x_cost));
             s.x_cost.scale_mut(c.rho);
         } else {
             s.x_cost = SMatrix::<T, Nx, Hx>::zeros()
@@ -349,10 +326,8 @@ where
         // Add cost contribution for input constraint violations
         let mut ucon_iter = ucon.iter_mut();
         if let Some(ucon_first) = ucon_iter.next() {
-            ucon_first.set_cost(s.u_cost.as_view_mut());
-            for con in ucon_iter {
-                con.add_cost(s.u_cost.as_view_mut(), u_scratch.as_view_mut());
-            }
+            ucon_first.set_cost(&mut s.u_cost);
+            ucon_iter.for_each(|con| con.add_cost(&mut s.u_cost));
             s.u_cost.scale_mut(c.rho);
         } else {
             s.u_cost = SMatrix::<T, Nu, Hu>::zeros()
@@ -379,10 +354,9 @@ where
 
         // Add the terminal tracking penalty, which uses Plqr
         if let Some(xref) = xref {
-            let mut x_scratch = x_scratch.column_mut(0);
-            let mut x_ricc_terminal = s.x_ricc.column_mut(Hx - 1);
-            c.Plqr.mul_to(&xref.column(Hx - 1), &mut x_scratch);
-            x_ricc_terminal -= &x_scratch;
+            s.x_ricc
+                .column_mut(Hx - 1)
+                .gemm(T::one(), &c.Plqr, &xref.column(Hx - 1), T::one());
         }
     }
 
@@ -393,16 +367,9 @@ where
         let c = self.cache.get_active();
 
         // Scratch vectors for zero-allocation, minimal copy operations
-        // Due to borrowing rules, we cannot define the x_scratch* vectors
-        // at the start, since that would require borrowing s.x mutably twice.
-        // Instead they are used in line in the places we need them. Included
-        // here as comments for clarity.
         let mut u_scratch = s.u.column_mut(0);
-        // let mut x_scratch0 = s.x.column_mut(0);
-        // let mut x_scratch1 = s.x.column_mut(1);
 
-        // Handles this special case correctly.
-        // This will be optimized away in the case they are different.
+        // This special case will be optimized away in the case they are different.
         if Hu == Hx - 1 {
             let i = Hu - 1;
 
@@ -414,7 +381,7 @@ where
 
         // The backward pass integrates cost-to-go over the full prediction horizon Hx
         for i in (0..Hx - 1).rev() {
-            let x_ricc_next = s.x_ricc.column(i + 1);
+            let (x_ricc_next, mut x_ricc_now) = optim::column_pair_mut(&mut s.x_ricc, i + 1, i);
 
             // Control action is only optimized up to Hu
             if i < Hu {
@@ -424,19 +391,14 @@ where
                 c.RpBPBi.mul_to(&u_scratch, &mut s.u_ricc.column_mut(i));
 
                 // Calc :: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i + 1] + Klqr^T * u_cost[i]
-                c.AmBKt.mul_to(&x_ricc_next, &mut s.x.column_mut(0));
-                c.Klqrt.mul_to(&s.u_cost.column(i), &mut s.x.column_mut(1));
-                let mut x_ricc_vec = s.x_ricc.column_mut(i);
-                s.x_cost.column(i).add_to(&s.x.column(0), &mut x_ricc_vec);
-                x_ricc_vec -= &s.x.column(1);
+                c.AmBKt.mul_to(&x_ricc_next, &mut x_ricc_now);
+                x_ricc_now.gemm(T::one(), &c.Klqrt, &s.u_cost.column(i), T::one());
+                x_ricc_now += &s.x_cost.column(i);
             } else {
-                // Update: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i + 1] + Klqr^T * u_cost[Hu - 1]
-                c.AmBKt.mul_to(&x_ricc_next, &mut s.x.column_mut(0));
-                c.Klqrt
-                    .mul_to(&s.u_cost.column(Hu - 1), &mut s.x.column_mut(1));
-                let mut x_ricc_vec = s.x_ricc.column_mut(i);
-                s.x_cost.column(i).add_to(&s.x.column(0), &mut x_ricc_vec);
-                x_ricc_vec -= &s.x.column(1);
+                // Calc :: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i + 1] + Klqr^T * u_cost[Hu - 1]
+                c.AmBKt.mul_to(&x_ricc_next, &mut x_ricc_now);
+                x_ricc_now.gemm(T::one(), &c.Klqrt, &s.u_cost.column(Hu - 1), T::one());
+                x_ricc_now += &s.x_cost.column(i);
             }
         }
     }
@@ -452,46 +414,48 @@ where
         if let Some(sys) = s.sys {
             // Roll out trajectory up to the control horizon (Hu)
             for i in 0..Hu {
-                // Calc :: u[i] = -K * x[i] + u_ricc[i]
-                let mut u_col = s.u.column_mut(i);
-                c.negKlqr.mul_to(&s.x.column(i), &mut u_col);
-                u_col -= &s.u_ricc.column(i);
-
-                // Calc :: x[i+1] = A * x[i] +  B * u[i]
-                s.x.set_column(i + 1, &sys(s.x.column(i), s.u.column(i)));
-            }
-
-            // Roll out rest of trajectory keeping u constant
-            let u_final = s.u.column(Hu - 1);
-            for i in Hu..Hx {
-                // Calc :: x[i+1] = A * x[i] +  B * u[Hu - 1]
-                s.x.set_column(i, &sys(s.x.column(i - 1), u_final));
-            }
-        } else {
-            // Roll out trajectory up to the control horizon Hu
-            for i in 0..Hu {
-                xnow.copy_from(&s.x.column(i));
+                let (x_now, x_next) = optim::column_pair_mut(&mut s.x, i, i + 1);
 
                 // Calc :: u[i] = -K * x[i] + u_ricc[i]
                 let mut u_col = s.u.column_mut(i);
-                c.negKlqr.mul_to(xnow, &mut u_col);
+                c.Klqr.mul_to(&x_now, &mut u_col);
                 u_col -= &s.u_ricc.column(i);
 
                 // Calc :: x[i+1] = A * x[i] +  B * u[i]
-                let mut x_col = s.x.column_mut(i + 1);
-                s.A.mul_to(xnow, &mut x_col);
-                x_col.gemm(T::one(), &s.B, &u_col, T::one());
+                sys(x_next, x_now.as_view(), s.u.column(i));
             }
 
             // Roll out rest of trajectory keeping u constant
             let u_final = s.u.column(Hu - 1);
             for i in Hu..Hx - 1 {
-                xnow.copy_from(&s.x.column(i));
+                let (x_now, x_next) = optim::column_pair_mut(&mut s.x, i, i + 1);
 
                 // Calc :: x[i+1] = A * x[i] +  B * u[Hu - 1]
-                let mut x_col = s.x.column_mut(i + 1);
-                s.A.mul_to(xnow, &mut x_col);
-                x_col.gemm(T::one(), &s.B, &u_final, T::one());
+                sys(x_next, x_now.as_view(), u_final);
+            }
+        } else {
+            // Roll out trajectory up to the control horizon Hu
+            for i in 0..Hu {
+                let (x_now, mut x_next) = optim::column_pair_mut(&mut s.x, i, i + 1);
+
+                // Calc :: u[i] = -K * x[i] + u_ricc[i]
+                let mut u_col = s.u.column_mut(i);
+                c.Klqr.mul_to(&x_now, &mut u_col);
+                u_col -= &s.u_ricc.column(i);
+
+                // Calc :: x[i+1] = A * x[i] +  B * u[i]
+                s.A.mul_to(&x_now, &mut x_next);
+                x_next.gemm(T::one(), &s.B, &u_col, T::one());
+            }
+
+            // Roll out rest of trajectory keeping u constant
+            let u_final = s.u.column(Hu - 1);
+            for i in Hu..Hx - 1 {
+                let (x_now, mut x_next) = optim::column_pair_mut(&mut s.x, i, i + 1);
+
+                // Calc :: x[i+1] = A * x[i] +  B * u[Hu - 1]
+                s.A.mul_to(&x_now, &mut x_next);
+                x_next.gemm(T::one(), &s.B, &u_final, T::one());
             }
         }
     }
