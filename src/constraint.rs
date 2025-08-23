@@ -22,6 +22,16 @@ impl<T, const N: usize, const H: usize> Project<T, N, H> for () {
     fn project(&self, mut _points: SMatrixViewMut<T, N, H>) {}
 }
 
+impl<P: Project<T, N, H>, T, const N: usize, const H: usize, const NUM: usize> Project<T, N, H>
+    for [P; NUM]
+{
+    fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+        for projector in self {
+            projector.project(points.as_view_mut());
+        }
+    }
+}
+
 macro_rules! derive_tuple_project {
     ($($project:ident: $number:tt),+) => {
         impl<$($project: Project<T, N, H>),+, T, const N: usize, const H: usize> Project<T, N, H>
@@ -52,12 +62,16 @@ derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P
 pub trait ProjectExt<T: RealField + Copy, const N: usize, const H: usize>:
     Project<T, N, H> + Sized
 {
+    fn dynamic(&self) -> &dyn Project<T, N, H> {
+        self
+    }
+
     fn constraint(&self) -> Constraint<T, &Self, N, H> {
         Constraint::new(self)
     }
 
     fn dyn_constraint(&self) -> DynConstraint<'_, T, N, H> {
-        Constraint::new(self as &dyn Project<T, N, H>)
+        Constraint::new(self.dynamic())
     }
 }
 

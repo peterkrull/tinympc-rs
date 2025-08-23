@@ -5,7 +5,7 @@
 use nalgebra::{RealField, SMatrix, SMatrixView, SVector, SVectorView, Scalar, convert};
 
 use crate::{
-    constraint::{Constraint, DynConstraint, Project},
+    constraint::{Constraint, Project},
     rho_cache::Cache,
 };
 
@@ -104,30 +104,35 @@ pub struct State<T, const Nx: usize, const Nu: usize, const Hx: usize, const Hu:
 
 pub struct Problem<
     'a,
-    'b,
     T,
-    CACHE,
+    C,
     const Nx: usize,
     const Nu: usize,
     const Hx: usize,
     const Hu: usize,
+    XProj = (),
+    UProj = (),
 > where
     T: Scalar + RealField + Copy,
-    CACHE: Cache<T, Nx, Nu>,
+    C: Cache<T, Nx, Nu>,
+    XProj: Project<T, Nx, Hx>,
+    UProj: Project<T, Nu, Hu>,
 {
-    mpc: &'a mut TinyMpc<T, CACHE, Nx, Nu, Hx, Hu>,
+    mpc: &'a mut TinyMpc<T, C, Nx, Nu, Hx, Hu>,
     xnow: SVector<T, Nx>,
     xref: Option<SMatrixView<'a, T, Nx, Hx>>,
     uref: Option<SMatrixView<'a, T, Nu, Hu>>,
-    xcon: Option<&'a mut [DynConstraint<'b, T, Nx, Hx>]>,
-    ucon: Option<&'a mut [DynConstraint<'b, T, Nu, Hu>]>,
+    xcon: Option<&'a mut [Constraint<T, XProj, Nx, Hx>]>,
+    ucon: Option<&'a mut [Constraint<T, UProj, Nu, Hu>]>,
 }
 
-impl<'a, 'b, T, CACHE, const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize>
-    Problem<'a, 'b, T, CACHE, Nx, Nu, Hx, Hu>
+impl<'a, T, C, XProj, UProj, const Nx: usize, const Nu: usize, const Hx: usize, const Hu: usize>
+    Problem<'a, T, C, Nx, Nu, Hx, Hu, XProj, UProj>
 where
     T: Scalar + RealField + Copy,
-    CACHE: Cache<T, Nx, Nu>,
+    C: Cache<T, Nx, Nu>,
+    XProj: Project<T, Nx, Hx>,
+    UProj: Project<T, Nu, Hu>,
 {
     pub fn x_reference(mut self, xref: impl Into<SMatrixView<'a, T, Nx, Hx>>) -> Self {
         self.xref = Some(xref.into());
@@ -139,14 +144,32 @@ where
         self
     }
 
-    pub fn x_constraints(mut self, xcon: &'a mut [DynConstraint<'b, T, Nx, Hx>]) -> Self {
-        self.xcon = Some(xcon);
-        self
+    pub fn x_constraints<Proj: Project<T, Nx, Hx>>(
+        self,
+        xcon: &'a mut [Constraint<T, Proj, Nx, Hx>],
+    ) -> Problem<'a, T, C, Nx, Nu, Hx, Hu, Proj, UProj> {
+        Problem {
+            mpc: self.mpc,
+            xnow: self.xnow,
+            xref: self.xref,
+            uref: self.uref,
+            xcon: Some(xcon),
+            ucon: self.ucon,
+        }
     }
 
-    pub fn u_constraints(mut self, ucon: &'a mut [DynConstraint<'b, T, Nu, Hu>]) -> Self {
-        self.ucon = Some(ucon);
-        self
+    pub fn u_constraints<Proj: Project<T, Nu, Hu>>(
+        self,
+        ucon: &'a mut [Constraint<T, Proj, Nu, Hu>],
+    ) -> Problem<'a, T, C, Nx, Nu, Hx, Hu, XProj, Proj> {
+        Problem {
+            mpc: self.mpc,
+            xnow: self.xnow,
+            xref: self.xref,
+            uref: self.uref,
+            xcon: self.xcon,
+            ucon: Some(ucon),
+        }
     }
 
     /// Run the TinyMPC solver
@@ -201,10 +224,10 @@ where
         })
     }
 
-    pub fn initial_condition<'b>(
+    pub fn initial_condition(
         &mut self,
         xnow: SVector<T, Nx>,
-    ) -> Problem<'_, 'b, T, C, Nx, Nu, Hx, Hu> {
+    ) -> Problem<'_, T, C, Nx, Nu, Hx, Hu> {
         Problem {
             mpc: self,
             xnow,

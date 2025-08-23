@@ -4,7 +4,7 @@ use nalgebra::{SMatrix, SVector, SVectorView, matrix, vector};
 use rerun::Color;
 use tinympc_rs::{
     Error, TinyMpc,
-    constraint::{Box, Constraint, Project, ProjectExt as _, Sphere},
+    constraint::{Box, Project, ProjectExt as _, Sphere},
     rho_cache::LookupCache,
 };
 
@@ -96,15 +96,16 @@ fn main() -> Result<(), Error> {
     // This should only be done if one constraint cannot immediately invalidate another constrant.
     let x_projector_bundle = (x_project_sphere, x_project_box);
 
+    // We can also iteratively project a bundle if they could push each other out of feasible region
+    // let x_projector_bundle = [&x_projector_bundle; 10];
+
     let u_projector_sphere = Sphere {
         center: vector![Some(0.0), Some(0.0), Some(0.0)],
         radius: 10.0,
     };
 
-    let mut xcon: [Constraint<f32, &dyn Project<f32, NX, HX>, NX, HX>; 1] =
-        [x_projector_bundle.dyn_constraint()];
-    let mut ucon: [Constraint<f32, &dyn Project<f32, NU, HU>, NU, HU>; 1] =
-        [u_projector_sphere.dyn_constraint()];
+    let mut xcon = [x_projector_bundle.constraint()];
+    let mut ucon = [u_projector_sphere.constraint()];
 
     let mut true_pos = vec![vector![0.0, 0.0, 0.0]];
 
@@ -134,9 +135,9 @@ fn main() -> Result<(), Error> {
 
         let problem = mpc
             .initial_condition(xnow)
-            .u_constraints(&mut ucon)
-            .x_constraints(&mut xcon)
-            .x_reference(&xref);
+            .u_constraints(ucon.as_mut())
+            .x_constraints(xcon.as_mut())
+            .x_reference(xref.as_view());
 
         let (reason, mut unow) = problem.solve();
 
