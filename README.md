@@ -78,8 +78,8 @@ let u_projector = Box {
 // the dual and slack variables needed by the optimizer
 // internally. These are arraya since we can also provide
 // multiple individual constraints.
-let mut x_con = [x_projector.constraint()];
-let mut u_con = [u_projector.constraint()];
+let mut xcon = [x_projector.constraint()];
+let mut ucon = [u_projector.constraint()];
 ```
 
 With everything set up, we just need to run it! For this example we want our states to track a reference trajectory defined by the matrix `xref` below. We also have the option to provide a reference to the inputs. Now, all of the magic (math and optimizations) lies under the hood of that call to `solve()`.
