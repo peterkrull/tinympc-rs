@@ -3,7 +3,8 @@ use std::time::Duration;
 use nalgebra::{SMatrix, SVector, SVectorView, matrix, vector};
 use rerun::Color;
 use tinympc_rs::{
-    constraint::{Box, Project as _, ProjectExt as _, Sphere}, Error, TinyMpc
+    Error, TinyMpc,
+    constraint::{Box, Project as _, ProjectExt as _, Sphere},
 };
 
 const HX: usize = 100;
@@ -58,7 +59,7 @@ fn sys(x: SVectorView<f32, NX>, u: SVectorView<f32, NU>) -> SVector<f32, NX> {
 
 pub static Q: SVector<f32, NX> = vector! {9., 9., 9., 0., 0., 0., 0., 0., 0.};
 pub static R: SVector<f32, NU> = vector! {3., 3., 3.};
-pub static RHO: f32 = 1.0;
+pub static RHO: f32 = 2.0;
 
 fn main() -> Result<(), Error> {
     let rec = rerun::RecordingStreamBuilder::new("tinympc-constraints")
@@ -70,8 +71,8 @@ fn main() -> Result<(), Error> {
     type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
 
     let mut mpc = Mpc::new(A, B, Q, R, RHO)?.with_sys(sys);
-    mpc.config.max_iter = 5;
-    mpc.config.do_check = 2;
+    mpc.config.max_iter = 15;
+    mpc.config.do_check = 5;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 

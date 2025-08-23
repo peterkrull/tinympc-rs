@@ -18,6 +18,10 @@ impl<P: Project<T, N, H>, T, const N: usize, const H: usize> Project<T, N, H> fo
     }
 }
 
+impl<T, const N: usize, const H: usize> Project<T, N, H> for () {
+    fn project(&self, mut _points: SMatrixViewMut<T, N, H>) {}
+}
+
 macro_rules! derive_tuple_project {
     ($($project:ident: $number:tt),+) => {
         impl<$($project: Project<T, N, H>),+, T, const N: usize, const H: usize> Project<T, N, H>
@@ -32,16 +36,16 @@ macro_rules! derive_tuple_project {
     };
 }
 
-derive_tuple_project!{P0: 0}
-derive_tuple_project!{P0: 0, P1: 1}
-derive_tuple_project!{P0: 0, P1: 1, P2: 2}
-derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3}
-derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4}
-derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5}
-derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6}
-derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7}
-derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8}
-derive_tuple_project!{P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8, P9: 9}
+derive_tuple_project! {P0: 0}
+derive_tuple_project! {P0: 0, P1: 1}
+derive_tuple_project! {P0: 0, P1: 1, P2: 2}
+derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3}
+derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4}
+derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5}
+derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6}
+derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7}
+derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8}
+derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8, P9: 9}
 
 /// Extension trait for types implementing [`Project`] to convert it directly
 /// into a constraint with associated dual and slack variables.
@@ -93,6 +97,20 @@ pub struct Sphere<T, const N: usize> {
 
 impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Sphere<T, N> {
     fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+
+        // Special case, just snap the points to the center coordinate
+        if self.radius.is_zero() {
+            for h in 0..H {
+                let mut point = points.column_mut(h);
+                for n in 0..N {
+                    if let Some(center) = self.center[n] {
+                        point[n] = center
+                    }
+                }
+            }
+            return
+        }
+
         for h in 0..H {
             let mut point = points.column_mut(h);
 
@@ -186,7 +204,6 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
     }
 
     /// Constrains the set of points, and if `update_res == true`, computes the maximum primal and dual residuals
-    #[inline(never)]
     pub fn constrain(
         &mut self,
         update_res: bool,
@@ -229,8 +246,13 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
         mut cost: SMatrixViewMut<T, N, H>,
         mut scratch: SMatrixViewMut<T, N, H>,
     ) {
-        self.dual.sub_to(&self.slac, &mut scratch);
+        self.set_cost(scratch.as_view_mut());
         cost += &scratch;
+    }
+
+    /// Add the cost associated with this constraints violation to a cost sum
+    pub(crate) fn set_cost(&mut self, mut cost: SMatrixViewMut<T, N, H>) {
+        self.dual.sub_to(&self.slac, &mut cost);
     }
 
     /// Re-scale the dual variables for when the value of rho has changed
