@@ -44,7 +44,7 @@ pub(crate) fn shift_columns_left<'a, T: Scalar, const R: usize, const C: usize>(
 
 /// Creates an array from a closure that can fail.
 ///
-/// If the closure returns `Err` for any element, this function will return that `Err`.
+/// If a closure returns `Err`, this function will return that `Err`.
 /// All previously initialized elements will be properly dropped.
 pub(crate) fn try_array_from_fn<T: Sized, E, const N: usize>(
     mut cb: impl FnMut(usize) -> Result<T, E>,

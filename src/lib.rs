@@ -13,8 +13,9 @@ use crate::{
 };
 
 pub mod constraint;
-mod optim;
 pub mod rho_cache;
+
+mod util;
 
 pub type LtiFn<F, const Nx: usize, const Nu: usize> =
     fn(SVectorViewMut<F, Nx>, SVectorView<F, Nx>, SVectorView<F, Nu>);
@@ -295,11 +296,11 @@ where
         u_con: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
         for con in x_con {
-            optim::shift_columns_left(&mut con.dual);
+            util::shift_columns_left(&mut con.dual);
         }
 
         for con in u_con {
-            optim::shift_columns_left(&mut con.dual);
+            util::shift_columns_left(&mut con.dual);
         }
     }
 
@@ -348,7 +349,7 @@ where
             // Add the terminal tracking penalty, which uses Plqr
             s.x_ricc
                 .column_mut(Hx - 1)
-                .gemm(T::one(), &c.Plqr, &x_ref.column(Hx - 1), T::one());
+                .gemv(T::one(), &c.Plqr, &x_ref.column(Hx - 1), T::one());
         }
 
         // Add input tracking cost for stages
@@ -366,7 +367,7 @@ where
         let s = &mut self.state;
         let c = self.cache.get_active();
 
-        // Scratch vectors for zero-allocation, minimal copy operations
+        // Scratch vector for zero-allocation, minimal copy operations
         let mut u_scratch = s.u_pred.column_mut(0);
 
         // This special case will be optimized away in the case they are different.
@@ -381,7 +382,7 @@ where
 
         // The backward pass integrates cost-to-go over the full prediction horizon Hx
         for i in (0..Hx - 1).rev() {
-            let (x_ricc_next, mut x_ricc_now) = optim::column_pair_mut(&mut s.x_ricc, i + 1, i);
+            let (x_ricc_next, mut x_ricc_now) = util::column_pair_mut(&mut s.x_ricc, i + 1, i);
 
             // Control action is only optimized up to Hu
             if i < Hu {
@@ -392,12 +393,12 @@ where
 
                 // Calc :: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i + 1] + Klqr^T * u_cost[i]
                 c.AmBKt.mul_to(&x_ricc_next, &mut x_ricc_now);
-                x_ricc_now.gemm(T::one(), &c.Klqrt, &s.u_cost.column(i), T::one());
+                x_ricc_now.gemv(T::one(), &c.Klqrt, &s.u_cost.column(i), T::one());
                 x_ricc_now += &s.x_cost.column(i);
             } else {
                 // Calc :: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i + 1] + Klqr^T * u_cost[Hu - 1]
                 c.AmBKt.mul_to(&x_ricc_next, &mut x_ricc_now);
-                x_ricc_now.gemm(T::one(), &c.Klqrt, &s.u_cost.column(Hu - 1), T::one());
+                x_ricc_now.gemv(T::one(), &c.Klqrt, &s.u_cost.column(Hu - 1), T::one());
                 x_ricc_now += &s.x_cost.column(i);
             }
         }
@@ -412,48 +413,48 @@ where
         if let Some(sys) = s.sys {
             // Roll out trajectory up to the control horizon (Hu)
             for i in 0..Hu {
-                let (x_now, x_next) = optim::column_pair_mut(&mut s.x_pred, i, i + 1);
+                let (x_now, x_next) = util::column_pair_mut(&mut s.x_pred, i, i + 1);
 
-                // Calc :: u[i] = -K * x[i] + u_ricc[i]
+                // Calc :: u[i] = -K * x[i] - u_ricc[i]  (K is pre-negated)
                 let mut u_col = s.u_pred.column_mut(i);
                 c.Klqr.mul_to(&x_now, &mut u_col);
                 u_col -= &s.u_ricc.column(i);
 
-                // Calc :: x[i+1] = A * x[i] +  B * u[i]
+                // Calc :: x[i+1] = A * x[i] + B * u[i]
                 sys(x_next, x_now.as_view(), s.u_pred.column(i));
             }
 
             // Roll out rest of trajectory keeping u constant
             let u_final = s.u_pred.column(Hu - 1);
             for i in Hu..Hx - 1 {
-                let (x_now, x_next) = optim::column_pair_mut(&mut s.x_pred, i, i + 1);
+                let (x_now, x_next) = util::column_pair_mut(&mut s.x_pred, i, i + 1);
 
-                // Calc :: x[i+1] = A * x[i] +  B * u[Hu - 1]
+                // Calc :: x[i+1] = A * x[i] + B * u[Hu - 1]
                 sys(x_next, x_now.as_view(), u_final);
             }
         } else {
             // Roll out trajectory up to the control horizon Hu
             for i in 0..Hu {
-                let (x_now, mut x_next) = optim::column_pair_mut(&mut s.x_pred, i, i + 1);
+                let (x_now, mut x_next) = util::column_pair_mut(&mut s.x_pred, i, i + 1);
 
-                // Calc :: u[i] = -K * x[i] + u_ricc[i]
+                // Calc :: u[i] = -K * x[i] - u_ricc[i] (K is pre-negated)
                 let mut u_col = s.u_pred.column_mut(i);
                 c.Klqr.mul_to(&x_now, &mut u_col);
                 u_col -= &s.u_ricc.column(i);
 
-                // Calc :: x[i+1] = A * x[i] +  B * u[i]
+                // Calc :: x[i+1] = A * x[i] + B * u[i]
                 s.A.mul_to(&x_now, &mut x_next);
-                x_next.gemm(T::one(), &s.B, &u_col, T::one());
+                x_next.gemv(T::one(), &s.B, &u_col, T::one());
             }
 
             // Roll out rest of trajectory keeping u constant
             let u_final = s.u_pred.column(Hu - 1);
             for i in Hu..Hx - 1 {
-                let (x_now, mut x_next) = optim::column_pair_mut(&mut s.x_pred, i, i + 1);
+                let (x_now, mut x_next) = util::column_pair_mut(&mut s.x_pred, i, i + 1);
 
-                // Calc :: x[i+1] = A * x[i] +  B * u[Hu - 1]
+                // Calc :: x[i+1] = A * x[i] + B * u[Hu - 1]
                 s.A.mul_to(&x_now, &mut x_next);
-                x_next.gemm(T::one(), &s.B, &u_final, T::one());
+                x_next.gemv(T::one(), &s.B, &u_final, T::one());
             }
         }
     }
@@ -512,8 +513,10 @@ where
         let terminate =
             max_prim_residual < cfg.prim_tol && max_dual_residual * c.rho < cfg.dual_tol;
 
+        let is_last = self.state.iter == cfg.max_iter - 1;
+
         // Try to adapt rho
-        if !terminate
+        if (!terminate || is_last)
             && let Some(scalar) = self
                 .cache
                 .update_active(max_prim_residual, max_dual_residual)

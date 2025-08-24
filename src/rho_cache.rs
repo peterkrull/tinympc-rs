@@ -140,9 +140,9 @@ where
         let threshold = convert(10.0);
         let active_index = NUM / 2;
 
-        let caches = crate::optim::try_array_from_fn(|index| {
+        let caches = crate::util::try_array_from_fn(|index| {
             let diff = index as i32 - active_index as i32;
-            let expo = convert::<f64, T>(1.6).powf(convert(diff as f64));
+            let expo = convert::<f64, T>(1.8).powf(convert(diff as f64));
             let rho = central_rho * expo;
             SingleCache::new(rho, iters, A, B, Q, R) // returns error
         })?;
