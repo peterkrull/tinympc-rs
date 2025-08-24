@@ -8,8 +8,8 @@ use tinympc_rs::{
     rho_cache::LookupCache,
 };
 
-const HX: usize = 100;
-const HU: usize = HX - 15;
+const HX: usize = 250;
+const HU: usize = HX - 10;
 
 const NX: usize = 9;
 const NU: usize = 3;
@@ -19,7 +19,7 @@ const DD: f32 = 0.5 * DT * DT;
 
 const LP: f32 = 0.5;
 
-pub static A: SMatrix<f32, NX, NX> = matrix![
+const A: SMatrix<f32, NX, NX> = matrix![
     1., 0., 0., DT, 0., 0., DD, 0., 0.;
     0., 1., 0., 0., DT, 0., 0., DD, 0.;
     0., 0., 1., 0., 0., DT, 0., 0., DD;
@@ -31,7 +31,7 @@ pub static A: SMatrix<f32, NX, NX> = matrix![
     0., 0., 0., 0., 0., 0., 0., 0., LP;
 ];
 
-pub static B: SMatrix<f32, NX, NU> = matrix![
+const B: SMatrix<f32, NX, NU> = matrix![
     0., 0., 0.;
     0., 0., 0.;
     0., 0., 0.;
@@ -55,9 +55,11 @@ fn sys(mut xnext: SVectorViewMut<f32, NX>, x: SVectorView<f32, NX>, u: SVectorVi
     xnext[8] = x[8] * LP + (1.0 - LP) * u[2];
 }
 
-pub static Q: SVector<f32, NX> = vector! {9., 9., 9., 0., 0., 0., 0., 0., 0.};
-pub static R: SVector<f32, NU> = vector! {3., 3., 3.};
-pub static RHO: f32 = 2.0;
+const NUM: f32 = 10.0;
+
+const Q: SVector<f32, NX> = vector! {NUM, NUM, NUM, 0., 0., 0., 0., 0., 0.};
+const R: SVector<f32, NU> = vector! {NUM, NUM, NUM,};
+const RHO: f32 = NUM;
 
 fn main() -> Result<(), Error> {
     let rec = rerun::RecordingStreamBuilder::new("tinympc-constraints")
@@ -69,8 +71,8 @@ fn main() -> Result<(), Error> {
     type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
 
     let mut mpc = Mpc::new(A, B, Q, R, RHO)?.with_sys(sys);
-    mpc.config.max_iter = 15;
-    mpc.config.do_check = 5;
+    mpc.config.max_iter = 500;
+    mpc.config.do_check = 20;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 
@@ -98,7 +100,7 @@ fn main() -> Result<(), Error> {
 
     let u_projector_sphere = Sphere {
         center: vector![Some(0.0), Some(0.0), Some(0.0)],
-        radius: 10.0,
+        radius: 2.0,
     };
 
     let mut x_con = [x_projector_bundle.constraint()];
@@ -108,13 +110,13 @@ fn main() -> Result<(), Error> {
 
     let mut total_iters = 0;
     let mut k = 0;
-    while k < 2000 {
+    while k < 2500 {
         k += 1;
 
         for i in 0..HX {
             let mut xref_col = SVector::zeros();
-            xref_col[0] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 1000.)).sin() * 4.;
-            xref_col[1] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 1000.)).cos() * 4.;
+            xref_col[0] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 500.)).sin() * 4.;
+            xref_col[1] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 500.)).cos() * 4.;
             xref_col[2] = (i + k) as f32 / 100.0;
 
             if i + k > 400 && i + k < 1200 {
@@ -123,6 +125,11 @@ fn main() -> Result<(), Error> {
 
             if i + k > 800 && i + k < 1500 {
                 xref_col[1] += -50.0;
+            }
+
+
+            if i + k > 2000 {
+                xref_col[2] = 49.0;
             }
 
             xref.set_column(i, &xref_col);
