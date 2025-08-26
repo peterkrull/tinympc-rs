@@ -252,11 +252,11 @@ where
         // Set initial error state
         self.state.ex.set_column(0, &(x_now - x_ref.column(0)));
 
-        // Construct tracking dynamics mismatch matrix (leveas last empty?)
+        // Construct tracking dynamics mismatch matrix (leaves last empty)
         for i in 0..Hx - 1 {
-            self.state
-                .w
-                .set_column(i, &(self.state.A * x_ref.column(i) - x_ref.column(i + 1)))
+            let mut w_col = self.state.w.column_mut(i);
+            self.state.A.mul_to(&x_ref.column(i), &mut w_col);
+            w_col -= &x_ref.column(i + 1);
         }
 
         self.warm_start(x_con, u_con);
@@ -297,21 +297,15 @@ where
     ) {
         for con in x_con {
             util::shift_columns_left(&mut con.dual);
-            util::shift_columns_left(&mut con.slac);
         }
 
         for con in u_con {
             util::shift_columns_left(&mut con.dual);
-            util::shift_columns_left(&mut con.slac);
         }
-
-        // util::shift_columns_left(&mut self.state.d);
-        // util::shift_columns_left(&mut self.state.p);
     }
-    /// Update linear control cost terms
 
+    /// Update linear control cost terms based on constraint violations
     #[inline]
-
     fn update_cost(
         &mut self,
         x_con: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
@@ -324,7 +318,9 @@ where
         let mut x_con_iter = x_con.iter_mut();
         if let Some(x_con_first) = x_con_iter.next() {
             x_con_first.set_cost(&mut s.q);
-            x_con_iter.for_each(|con| con.add_cost(&mut s.q));
+            for con in x_con_iter {
+                con.add_cost(&mut s.q);
+            }
             s.q.scale_mut(c.rho);
         } else {
             s.q = SMatrix::<T, Nx, Hx>::zeros()
@@ -334,7 +330,9 @@ where
         let mut u_con_iter = u_con.iter_mut();
         if let Some(u_con_first) = u_con_iter.next() {
             u_con_first.set_cost(&mut s.r);
-            u_con_iter.for_each(|con| con.add_cost(&mut s.r));
+            for con in u_con_iter {
+                con.add_cost(&mut s.r);
+            }
             s.r.scale_mut(c.rho);
         } else {
             s.r = SMatrix::<T, Nu, Hu>::zeros()
@@ -351,13 +349,21 @@ where
         let c = self.cache.get_active();
 
         for i in (0..Hx - 1).rev() {
-            let (mut p_now, p_fut) = util::column_pair_mut(&mut s.p, i, i + 1);
-            p_now.copy_from(&(c.AmBKt * (p_fut + &c.Plqr * &s.w.column(i)) + s.q.column(i) - c.Klqr.transpose() * s.r.column(i.min(Hu - 1))));
-        }
+            let (mut p_now, mut p_fut) = util::column_pair_mut(&mut s.p, i, i + 1);
 
-        for i in (0..Hu).rev() {
-            let p_fut = s.p.column(i+1);
-            s.d.set_column(i, &(c.RpBPBi * (&s.Bt * &(&p_fut + &c.Plqr * &s.w.column(i)) + s.r.column(i))));
+            // AmBKt * (p[i+1] + Plqr * w[i]) + q[i] - Klqr' * r[:,u_index]
+            p_fut.gemv(T::one(), &c.Plqr, &s.w.column(i), T::one());
+            c.AmBKt.mul_to(&p_fut, &mut p_now);
+            p_now.gemv(-T::one(), &c.Klqr.transpose(), &s.r.column(i.min(Hu - 1)), T::one());
+            p_now += s.q.column(i);
+
+            if i < Hu {
+                let mut r_col = s.r.column_mut(i);
+                let mut d_col = s.d.column_mut(i);
+
+                r_col.gemv(T::one(), &s.Bt, &p_fut, T::one());
+                c.RpBPBi.mul_to(&r_col, &mut d_col);
+            }
         }
     }
 
