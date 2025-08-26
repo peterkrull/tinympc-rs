@@ -30,9 +30,6 @@ pub struct SingleCache<T, const Nx: usize, const Nu: usize> {
     /// Infinite-time horizon LQR gain
     pub(crate) Klqr: SMatrix<T, Nu, Nx>,
 
-    /// Transposed infinite-time horizon LQR gain
-    pub(crate) Klqrt: SMatrix<T, Nx, Nu>,
-
     /// Infinite-time horizon LQR cost-to-go
     pub(crate) Plqr: SMatrix<T, Nx, Nx>,
 
@@ -66,8 +63,11 @@ impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx
             return Err(Error::RNotPositiveDefinite);
         }
 
-        let Q_diag = SMatrix::from_diagonal(&Q.add_scalar(rho));
-        let R_diag = SMatrix::from_diagonal(&R.add_scalar(rho));
+        let Q_aug = Q.add_scalar(rho);
+        let R_aug = R.add_scalar(rho);
+
+        let Q_diag = SMatrix::from_diagonal(&Q_aug);
+        let R_diag = SMatrix::from_diagonal(&R_aug);
 
         let mut Klqr = SMatrix::zeros();
         let mut Plqr = Q_diag.clone_owned();
@@ -87,10 +87,6 @@ impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx
             .ok_or(INVERR)?;
         let AmBKt = (A - B * Klqr).transpose();
 
-        let Klqrt = -Klqr.transpose();
-        let Klqr = -Klqr;
-        let Plqr = -Plqr;
-
         // If RpBPBi and AmBKt are finite, so are all the other values
         ([].iter())
             .chain(RpBPBi.iter())
@@ -99,7 +95,6 @@ impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx
             .then_some(SingleCache {
                 rho,
                 Klqr,
-                Klqrt,
                 Plqr,
                 RpBPBi,
                 AmBKt,
@@ -137,12 +132,12 @@ where
         Q: &SVector<T, Nx>,
         R: &SVector<T, Nu>,
     ) -> Result<Self, Error> {
-        let threshold = convert(10.0);
+        let threshold = convert(15.0);
         let active_index = NUM / 2;
 
         let caches = crate::util::try_array_from_fn(|index| {
             let diff = index as i32 - active_index as i32;
-            let expo = convert::<f64, T>(1.8).powf(convert(diff as f64));
+            let expo = convert::<f64, T>(1.6).powf(convert(diff as f64));
             let rho = central_rho * expo;
             SingleCache::new(rho, iters, A, B, Q, R) // returns error
         })?;
@@ -162,14 +157,26 @@ where
         let dual_residual = dual_residual * prev_rho;
 
         // For much larger primal residuals, increase rho
-        if prim_residual * self.threshold > dual_residual {
-            self.active_index = (self.active_index + 1).min(NUM - 1);
-            cache = &self.caches[self.active_index];
+        if prim_residual > dual_residual * self.threshold {
+            if self.active_index < NUM - 1 {
+                self.active_index += 1;
+                cache = &self.caches[self.active_index];
+                println!(
+                    "+ Increasing rho to: {} (index: {})",
+                    cache.rho, self.active_index
+                );
+            }
         }
         // For much larger dual residuals, decrease rho
-        else if dual_residual * self.threshold > prim_residual {
-            self.active_index = self.active_index.saturating_sub(1);
-            cache = &self.caches[self.active_index];
+        else if dual_residual > prim_residual * self.threshold {
+            if self.active_index > 0 {
+                self.active_index -= 1;
+                cache = &self.caches[self.active_index];
+                println!(
+                    "- Decreasing rho to: {} (index: {})",
+                    cache.rho, self.active_index
+                );
+            }
         }
 
         // If the value of rho changed we must also rescale all duals

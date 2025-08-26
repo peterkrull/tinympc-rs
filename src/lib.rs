@@ -1,4 +1,4 @@
-#![no_std]
+// #![no_std]
 #![allow(clippy::op_ref)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -81,26 +81,20 @@ pub struct State<T, const Nx: usize, const Nu: usize, const Hx: usize, const Hu:
     B: SMatrix<T, Nx, Nu>,
     Bt: SMatrix<T, Nu, Nx>,
 
-    /// State tracking error penalty vector
-    Q: SVector<T, Nx>,
-
-    /// Input tracking error penalty vector
-    R: SVector<T, Nu>,
-
-    /// Useful when case A and B are sparse
-    sys: Option<LtiFn<T, Nx, Nu>>,
+    // Tracking dynamics mismatch
+    w: SMatrix<T, Nx, Hx>,
 
     // Linear cost matrices
-    x_cost: SMatrix<T, Nx, Hx>,
-    u_cost: SMatrix<T, Nu, Hu>,
+    q: SMatrix<T, Nx, Hx>,
+    r: SMatrix<T, Nu, Hu>,
 
     // Riccati backward pass terms
-    x_ricc: SMatrix<T, Nx, Hx>,
-    u_ricc: SMatrix<T, Nu, Hu>,
+    p: SMatrix<T, Nx, Hx>,
+    d: SMatrix<T, Nu, Hu>,
 
-    // State and input predictions
-    x_pred: SMatrix<T, Nx, Hx>,
-    u_pred: SMatrix<T, Nu, Hu>,
+    // State and input tracking error predictions
+    ex: SMatrix<T, Nx, Hx>,
+    eu: SMatrix<T, Nu, Hu>,
 
     // Number of iterations for latest solve
     iter: usize,
@@ -214,16 +208,14 @@ where
             state: State {
                 A,
                 B,
-                Q,
-                R,
                 Bt: B.transpose(),
-                sys: None,
-                x_cost: SMatrix::zeros(),
-                u_cost: SMatrix::zeros(),
-                x_ricc: SMatrix::zeros(),
-                u_ricc: SMatrix::zeros(),
-                x_pred: SMatrix::zeros(),
-                u_pred: SMatrix::zeros(),
+                w: SMatrix::zeros(),
+                q: SMatrix::zeros(),
+                r: SMatrix::zeros(),
+                p: SMatrix::zeros(),
+                d: SMatrix::zeros(),
+                ex: SMatrix::zeros(),
+                eu: SMatrix::zeros(),
                 iter: 0,
             },
         })
@@ -243,34 +235,42 @@ where
         }
     }
 
-    pub fn with_sys(mut self, sys: LtiFn<T, Nx, Nu>) -> Self {
-        self.state.sys = Some(sys);
-        self
-    }
-
     pub fn solve(
         &mut self,
         x_now: SVector<T, Nx>,
         x_ref: Option<SMatrixView<T, Nx, Hx>>,
-        u_ref: Option<SMatrixView<T, Nu, Hu>>,
+        u_ref: Option<SMatrixView<T, Nu, Hu>>, // unused for now
         x_con: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
         u_con: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) -> (TerminationReason, SVector<T, Nu>) {
         let mut reason = TerminationReason::MaxIters;
 
-        self.warm_start(x_con, u_con);
+        // For now assume we have a state reference
+        let u_ref = u_ref.unwrap();
+        let x_ref = x_ref.unwrap();
 
-        self.state.x_pred.set_column(0, &x_now);
+        // Set initial error state
+        self.state.ex.set_column(0, &(x_now - x_ref.column(0)));
+
+        // Construct tracking dynamics mismatch matrix (leveas last empty?)
+        for i in 0..Hx - 1 {
+            self.state
+                .w
+                .set_column(i, &(self.state.A * x_ref.column(i) - x_ref.column(i + 1)))
+        }
+
+        self.warm_start(x_con, u_con);
 
         self.state.iter = 0;
         while self.state.iter < self.config.max_iter {
-            self.update_cost(x_ref, u_ref, x_con, u_con);
+            // This goes first
+            self.update_cost(x_con, u_con);
 
             self.backward_pass();
 
             self.forward_pass();
 
-            self.update_constraints(x_con, u_con);
+            self.update_constraints(x_ref, u_ref, x_con, u_con);
 
             if self.check_termination(x_con, u_con) {
                 reason = TerminationReason::Converged;
@@ -297,19 +297,23 @@ where
     ) {
         for con in x_con {
             util::shift_columns_left(&mut con.dual);
+            util::shift_columns_left(&mut con.slac);
         }
 
         for con in u_con {
             util::shift_columns_left(&mut con.dual);
+            util::shift_columns_left(&mut con.slac);
         }
-    }
 
+        // util::shift_columns_left(&mut self.state.d);
+        // util::shift_columns_left(&mut self.state.p);
+    }
     /// Update linear control cost terms
+
     #[inline]
+
     fn update_cost(
         &mut self,
-        x_ref: Option<SMatrixView<T, Nx, Hx>>,
-        u_ref: Option<SMatrixView<T, Nu, Hu>>,
         x_con: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
         u_con: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
@@ -319,46 +323,25 @@ where
         // Add cost contribution for state constraint violations
         let mut x_con_iter = x_con.iter_mut();
         if let Some(x_con_first) = x_con_iter.next() {
-            x_con_first.set_cost(&mut s.x_cost);
-            x_con_iter.for_each(|con| con.add_cost(&mut s.x_cost));
-            s.x_cost.scale_mut(c.rho);
+            x_con_first.set_cost(&mut s.q);
+            x_con_iter.for_each(|con| con.add_cost(&mut s.q));
+            s.q.scale_mut(c.rho);
         } else {
-            s.x_cost = SMatrix::<T, Nx, Hx>::zeros()
+            s.q = SMatrix::<T, Nx, Hx>::zeros()
         }
 
         // Add cost contribution for input constraint violations
         let mut u_con_iter = u_con.iter_mut();
         if let Some(u_con_first) = u_con_iter.next() {
-            u_con_first.set_cost(&mut s.u_cost);
-            u_con_iter.for_each(|con| con.add_cost(&mut s.u_cost));
-            s.u_cost.scale_mut(c.rho);
+            u_con_first.set_cost(&mut s.r);
+            u_con_iter.for_each(|con| con.add_cost(&mut s.r));
+            s.r.scale_mut(c.rho);
         } else {
-            s.u_cost = SMatrix::<T, Nu, Hu>::zeros()
+            s.r = SMatrix::<T, Nu, Hu>::zeros()
         }
 
         // Extract ADMM cost term for Riccati terminal condition
-        s.x_ricc.set_column(Hx - 1, &s.x_cost.column(Hx - 1));
-
-        // Add state tracking cost for stages
-        if let Some(x_ref) = x_ref {
-            for i in 0..Hx {
-                let mut x_cost_col = s.x_cost.column_mut(i);
-                x_cost_col -= &x_ref.column(i).component_mul(&s.Q);
-            }
-
-            // Add the terminal tracking penalty, which uses Plqr
-            s.x_ricc
-                .column_mut(Hx - 1)
-                .gemv(T::one(), &c.Plqr, &x_ref.column(Hx - 1), T::one());
-        }
-
-        // Add input tracking cost for stages
-        if let Some(u_ref) = u_ref {
-            for i in 0..Hu {
-                let mut u_cost_col = s.u_cost.column_mut(i);
-                u_cost_col -= &u_ref.column(i).component_mul(&s.R);
-            }
-        }
+        s.p.set_column(Hx - 1, &(s.q.column(Hx - 1)));
     }
 
     /// Backward pass to update Ricatti variables
@@ -367,40 +350,14 @@ where
         let s = &mut self.state;
         let c = self.cache.get_active();
 
-        // Scratch vector for zero-allocation, minimal copy operations
-        let mut u_scratch = s.u_pred.column_mut(0);
-
-        // This special case will be optimized away in the case they are different.
-        if Hu == Hx - 1 {
-            let i = Hu - 1;
-
-            // Calc :: u_ricc[i] = RpBPBi * (B^T * x_ricc[i + 1] + u_cost[i])
-            s.Bt.mul_to(&s.x_ricc.column(i + 1), &mut u_scratch);
-            u_scratch += &s.u_cost.column(i);
-            c.RpBPBi.mul_to(&u_scratch, &mut s.u_ricc.column_mut(i));
+        for i in (0..Hx - 1).rev() {
+            let (mut p_now, p_fut) = util::column_pair_mut(&mut s.p, i, i + 1);
+            p_now.copy_from(&(c.AmBKt * (p_fut + &c.Plqr * &s.w.column(i)) + s.q.column(i) - c.Klqr.transpose() * s.r.column(i.min(Hu - 1))));
         }
 
-        // The backward pass integrates cost-to-go over the full prediction horizon Hx
-        for i in (0..Hx - 1).rev() {
-            let (x_ricc_next, mut x_ricc_now) = util::column_pair_mut(&mut s.x_ricc, i + 1, i);
-
-            // Control action is only optimized up to Hu
-            if i < Hu {
-                // Calc :: u_ricc[i] = RpBPBi * (B^T * x_ricc[i + 1] + u_cost[i])
-                s.Bt.mul_to(&x_ricc_next, &mut u_scratch);
-                u_scratch += &s.u_cost.column(i);
-                c.RpBPBi.mul_to(&u_scratch, &mut s.u_ricc.column_mut(i));
-
-                // Calc :: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i + 1] + Klqr^T * u_cost[i]
-                c.AmBKt.mul_to(&x_ricc_next, &mut x_ricc_now);
-                x_ricc_now.gemv(T::one(), &c.Klqrt, &s.u_cost.column(i), T::one());
-                x_ricc_now += &s.x_cost.column(i);
-            } else {
-                // Calc :: x_ricc[i] = x_cost[i] + AmBKt * x_ricc[i + 1] + Klqr^T * u_cost[Hu - 1]
-                c.AmBKt.mul_to(&x_ricc_next, &mut x_ricc_now);
-                x_ricc_now.gemv(T::one(), &c.Klqrt, &s.u_cost.column(Hu - 1), T::one());
-                x_ricc_now += &s.x_cost.column(i);
-            }
+        for i in (0..Hu).rev() {
+            let p_fut = s.p.column(i+1);
+            s.d.set_column(i, &(c.RpBPBi * (&s.Bt * &(&p_fut + &c.Plqr * &s.w.column(i)) + s.r.column(i))));
         }
     }
 
@@ -410,52 +367,17 @@ where
         let s = &mut self.state;
         let c = self.cache.get_active();
 
-        if let Some(sys) = s.sys {
-            // Roll out trajectory up to the control horizon (Hu)
-            for i in 0..Hu {
-                let (x_now, x_next) = util::column_pair_mut(&mut s.x_pred, i, i + 1);
+        // Roll out trajectory up to the control horizon (Hu)
+        for i in 0..Hu {
+            let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
+            s.eu.set_column(i, &(-&c.Klqr * &ex_now - s.d.column(i)));
+            ex_fut.copy_from(&(&s.A * &ex_now + &s.B * s.eu.column(i) + s.w.column(i)));
+        }
 
-                // Calc :: u[i] = -K * x[i] - u_ricc[i]  (K is pre-negated)
-                let mut u_col = s.u_pred.column_mut(i);
-                c.Klqr.mul_to(&x_now, &mut u_col);
-                u_col -= &s.u_ricc.column(i);
-
-                // Calc :: x[i+1] = A * x[i] + B * u[i]
-                sys(x_next, x_now.as_view(), s.u_pred.column(i));
-            }
-
-            // Roll out rest of trajectory keeping u constant
-            let u_final = s.u_pred.column(Hu - 1);
-            for i in Hu..Hx - 1 {
-                let (x_now, x_next) = util::column_pair_mut(&mut s.x_pred, i, i + 1);
-
-                // Calc :: x[i+1] = A * x[i] + B * u[Hu - 1]
-                sys(x_next, x_now.as_view(), u_final);
-            }
-        } else {
-            // Roll out trajectory up to the control horizon Hu
-            for i in 0..Hu {
-                let (x_now, mut x_next) = util::column_pair_mut(&mut s.x_pred, i, i + 1);
-
-                // Calc :: u[i] = -K * x[i] - u_ricc[i] (K is pre-negated)
-                let mut u_col = s.u_pred.column_mut(i);
-                c.Klqr.mul_to(&x_now, &mut u_col);
-                u_col -= &s.u_ricc.column(i);
-
-                // Calc :: x[i+1] = A * x[i] + B * u[i]
-                s.A.mul_to(&x_now, &mut x_next);
-                x_next.gemv(T::one(), &s.B, &u_col, T::one());
-            }
-
-            // Roll out rest of trajectory keeping u constant
-            let u_final = s.u_pred.column(Hu - 1);
-            for i in Hu..Hx - 1 {
-                let (x_now, mut x_next) = util::column_pair_mut(&mut s.x_pred, i, i + 1);
-
-                // Calc :: x[i+1] = A * x[i] + B * u[Hu - 1]
-                s.A.mul_to(&x_now, &mut x_next);
-                x_next.gemv(T::one(), &s.B, &u_final, T::one());
-            }
+        // Roll out rest of trajectory keeping u constant
+        for i in Hu..Hx - 1 {
+            let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
+            ex_fut.copy_from(&(&s.A * &ex_now + &s.B * s.eu.column(Hu - 1) + s.w.column(i)));
         }
     }
 
@@ -463,6 +385,8 @@ where
     #[inline]
     fn update_constraints(
         &mut self,
+        x_ref: SMatrixView<T, Nx, Hx>,
+        u_ref: SMatrixView<T, Nu, Hu>,
         x_con: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
         u_con: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
@@ -471,15 +395,15 @@ where
 
         // We are done using the cost matrices for this iteration,
         // so they can safely be used as scratch buffers.
-        let u_scratch = &mut s.u_cost;
-        let x_scratch = &mut s.x_cost;
+        let u_scratch = &mut s.r;
+        let x_scratch = &mut s.q;
 
         for con in x_con {
-            con.constrain(update_res, s.x_pred.as_view(), x_scratch.as_view_mut());
+            con.constrain(update_res, x_ref, s.ex.as_view());
         }
 
         for con in u_con {
-            con.constrain(update_res, s.u_pred.as_view(), u_scratch.as_view_mut());
+            con.constrain(update_res, u_ref, s.eu.as_view());
         }
     }
 
@@ -540,21 +464,21 @@ where
 
     /// Get the system input `u` for the time `i`
     pub fn get_u_at(&self, i: usize) -> SVector<T, Nu> {
-        self.state.u_pred.column(i).into()
+        self.state.eu.column(i).into()
     }
 
     /// Get the system input `u` for the current time
     pub fn get_u(&self) -> SVector<T, Nu> {
-        self.state.u_pred.column(0).into()
+        self.state.eu.column(0).into()
     }
 
     /// Get reference to matrix containing state predictions
     pub fn get_x_matrix(&self) -> &SMatrix<T, Nx, Hx> {
-        &self.state.x_pred
+        &self.state.ex
     }
 
     /// Get reference to matrix containing input predictions
     pub fn get_u_matrix(&self) -> &SMatrix<T, Nu, Hu> {
-        &self.state.u_pred
+        &self.state.eu
     }
 }

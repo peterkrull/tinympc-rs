@@ -8,8 +8,8 @@ use tinympc_rs::{
     rho_cache::LookupCache,
 };
 
-const HX: usize = 250;
-const HU: usize = HX - 10;
+const HX: usize = 100;
+const HU: usize = HX - 20;
 
 const NX: usize = 9;
 const NU: usize = 3;
@@ -17,7 +17,7 @@ const NU: usize = 3;
 const DT: f32 = 0.1;
 const DD: f32 = 0.5 * DT * DT;
 
-const LP: f32 = 0.5;
+const LP: f32 = 0.9;
 
 const A: SMatrix<f32, NX, NX> = matrix![
     1., 0., 0., DT, 0., 0., DD, 0., 0.;
@@ -55,24 +55,22 @@ fn sys(mut xnext: SVectorViewMut<f32, NX>, x: SVectorView<f32, NX>, u: SVectorVi
     xnext[8] = x[8] * LP + (1.0 - LP) * u[2];
 }
 
-const NUM: f32 = 10.0;
-
-const Q: SVector<f32, NX> = vector! {NUM, NUM, NUM, 0., 0., 0., 0., 0., 0.};
-const R: SVector<f32, NU> = vector! {NUM, NUM, NUM,};
-const RHO: f32 = NUM;
+const Q: SVector<f32, NX> = vector! {1., 1., 1., 0., 0., 0., 0., 0., 0.};
+const R: SVector<f32, NU> = vector! {1., 1., 1.,};
+const RHO: f32 = 2.0;
 
 fn main() -> Result<(), Error> {
     let rec = rerun::RecordingStreamBuilder::new("tinympc-constraints")
         .spawn()
         .unwrap();
 
-    const NUM_CACHES: usize = 5;
+    const NUM_CACHES: usize = 1;
     type Cache = LookupCache<f32, NX, NU, NUM_CACHES>;
     type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
 
-    let mut mpc = Mpc::new(A, B, Q, R, RHO)?.with_sys(sys);
-    mpc.config.max_iter = 500;
-    mpc.config.do_check = 20;
+    let mut mpc = Mpc::new(A, B, Q, R, RHO)?;
+    mpc.config.max_iter = 5;
+    mpc.config.do_check = 2;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 
@@ -82,7 +80,7 @@ fn main() -> Result<(), Error> {
     #[rustfmt::skip]
     let x_project_sphere = Sphere {
         center: vector![None, None, None, Some(0.0), Some(0.0), Some(0.0), None, None, None],
-        radius: 4.0,
+        radius: 6.0,
     };
 
     #[rustfmt::skip]
@@ -100,7 +98,7 @@ fn main() -> Result<(), Error> {
 
     let u_projector_sphere = Sphere {
         center: vector![Some(0.0), Some(0.0), Some(0.0)],
-        radius: 2.0,
+        radius: 10.0,
     };
 
     let mut x_con = [x_projector_bundle.constraint()];
@@ -127,7 +125,6 @@ fn main() -> Result<(), Error> {
                 xref_col[1] += -50.0;
             }
 
-
             if i + k > 2000 {
                 xref_col[2] = 49.0;
             }
@@ -141,27 +138,29 @@ fn main() -> Result<(), Error> {
             .initial_condition(x_now)
             .u_constraints(u_con.as_mut())
             .x_constraints(x_con.as_mut())
+            .u_reference(SMatrix::<f32, NU, HU>::zeros().as_view())
             .x_reference(xref.as_view())
             .solve();
 
         println!(
-            "Got solution: {:?} in {} ms)",
+            "Got solution: {:?} in {} ms) in {} iters",
             u_now.as_slice(),
-            time.elapsed().as_micros() as f32 / 1e3
+            time.elapsed().as_micros() as f32 / 1e3,
+            mpc.get_num_iters()
         );
 
         total_iters += mpc.get_num_iters();
 
         // std::thread::sleep(std::time::Duration::from_millis(16));
 
-        match reason {
-            tinympc_rs::TerminationReason::Converged => {
-                println!("Converged in {} iters", mpc.get_num_iters())
-            }
-            tinympc_rs::TerminationReason::MaxIters => {
-                println!("Reached max ({}) iters", mpc.get_num_iters())
-            }
-        }
+        // match reason {
+        //     tinympc_rs::TerminationReason::Converged => {
+        //         println!("Converged in {} iters", mpc.get_num_iters())
+        //     }
+        //     tinympc_rs::TerminationReason::MaxIters => {
+        //         println!("Reached max ({}) iters", mpc.get_num_iters())
+        //     }
+        // }
 
         // Apply input to system
         u_projector_sphere.project(u_now.as_view_mut());
@@ -193,7 +192,7 @@ fn main() -> Result<(), Error> {
         let strips = rerun::LineStrips2D::new([u_x, u_y, u_z]);
         rec.log("u_strips", &strips).unwrap();
 
-        let mut x_mat = mpc.get_x_matrix().clone();
+        let mut x_mat = mpc.get_x_matrix().clone() + xref;
         let x_iter = x_mat.column_iter().enumerate();
         let x_x = rerun::LineStrip2D::from_iter(
             x_iter
@@ -274,7 +273,7 @@ fn main() -> Result<(), Error> {
 
         let x = x_now;
 
-        let vec = mpc.get_x_matrix().column(0);
+        let vec = mpc.get_x_matrix().column(0) + xref.column(0);
         rec.log(
             "position",
             &rerun::Points3D::new([[vec[0] as f32, vec[1] as f32, vec[2] as f32]])
@@ -310,7 +309,7 @@ fn main() -> Result<(), Error> {
         rec.log("x_position_ref", &strips).unwrap();
 
         let pos_pred_strips = rerun::LineStrip3D::from_iter(
-            mpc.get_x_matrix()
+            (mpc.get_x_matrix() + xref)
                 .column_iter()
                 .map(|vec| [vec[0] as f32, vec[1] as f32, vec[2] as f32]),
         );
@@ -323,3 +322,5 @@ fn main() -> Result<(), Error> {
 
     Ok(())
 }
+
+

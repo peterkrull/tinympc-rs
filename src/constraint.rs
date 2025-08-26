@@ -181,10 +181,6 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for H
     }
 }
 
-/// Type alias for a [`Constraint`] that dynamically dispatches its projection function
-pub type DynConstraint<'a, F, const N: usize, const H: usize> =
-    Constraint<F, &'a dyn Project<F, N, H>, N, H>;
-
 /// A [`Constraint`] consists of a projection function and a set of associated slack and dual variables.
 pub struct Constraint<T, P: Project<T, N, H>, const N: usize, const H: usize> {
     pub max_prim_residual: T,
@@ -193,6 +189,10 @@ pub struct Constraint<T, P: Project<T, N, H>, const N: usize, const H: usize> {
     pub(crate) dual: SMatrix<T, N, H>,
     pub(crate) projector: P,
 }
+
+/// Type alias for a [`Constraint`] that dynamically dispatches its projection function
+pub type DynConstraint<'a, F, const N: usize, const H: usize> =
+    Constraint<F, &'a dyn Project<F, N, H>, N, H>;
 
 impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
     Constraint<T, P, N, H>
@@ -225,37 +225,34 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
     /// Constrains the set of points, and if `update_res == true`, computes the maximum primal and dual residuals
     pub fn constrain(
         &mut self,
-        update_res: bool,
+        compute_residual: bool,
+        reference: SMatrixView<T, N, H>,
         points: SMatrixView<T, N, H>,
-        mut scratch: SMatrixViewMut<T, N, H>,
     ) {
-        if update_res {
-            // Save old slac variables for computing dual residual
-            scratch.copy_from(&self.slac);
-        }
+        // Save old slac variables for computing dual residual
+        let old_slac = self.slac.clone_owned();
 
-        // Slack update: slac' = point + dual;
-        points.add_to(&self.dual, &mut self.slac);
-
+        // Offset the slack variables by the reference before projecting
+        self.slac = (points + reference) + self.dual;
         self.projector.project(self.slac.as_view_mut());
-
-        if update_res {
-            // Compute maximum absolute dual residual
-            scratch -= &self.slac;
-            scratch.apply(|t| *t = t.abs());
-            self.max_dual_residual = scratch.max();
-        }
+        self.slac -= reference;
 
         // Compute primal residual
-        points.sub_to(&self.slac, &mut scratch);
+        let mut prim_residual = &points - self.slac;
 
         // Update dual parameters
-        self.dual += &scratch;
+        self.dual += &prim_residual;
 
-        if update_res {
-            // Find maximum absolute primal residual
-            scratch.apply(|t| *t = t.abs());
-            self.max_prim_residual = scratch.max();
+        // Find maximum absolute residuals
+        if compute_residual {
+            // Compute primal residual
+            let mut dual_residual = &old_slac - self.slac;
+
+            dual_residual.apply(|t| *t = t.abs());
+            self.max_dual_residual = dual_residual.max();
+
+            prim_residual.apply(|t| *t = t.abs());
+            self.max_prim_residual = prim_residual.max();
         }
     }
 
