@@ -165,10 +165,6 @@ where
             if self.active_index < NUM - 1 {
                 self.active_index += 1;
                 cache = &self.caches[self.active_index];
-                println!(
-                    "+ Increasing rho to: {} (index: {})",
-                    cache.rho, self.active_index
-                );
             }
         }
         // For much larger dual residuals, decrease rho
@@ -176,10 +172,6 @@ where
             if self.active_index > 0 {
                 self.active_index -= 1;
                 cache = &self.caches[self.active_index];
-                println!(
-                    "- Decreasing rho to: {} (index: {})",
-                    cache.rho, self.active_index
-                );
             }
         }
 

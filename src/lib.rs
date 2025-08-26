@@ -1,4 +1,4 @@
-// #![no_std]
+#![no_std]
 #![allow(clippy::op_ref)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -406,6 +406,7 @@ where
         let c = self.cache.get_active();
 
         if let Some(system) = s.sys {
+
             // Roll out trajectory up to the control horizon (Hu)
             for i in 0..Hu {
                 let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
