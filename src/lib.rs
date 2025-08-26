@@ -284,7 +284,7 @@ where
         (reason, self.get_u())
     }
 
-    fn should_calculate_residuals(&self) -> bool {
+    fn should_compute_residuals(&self) -> bool {
         self.state.iter % self.config.do_check == 0
     }
 
@@ -318,8 +318,8 @@ where
         let mut x_con_iter = x_con.iter_mut();
         if let Some(x_con_first) = x_con_iter.next() {
             x_con_first.set_cost(&mut s.q);
-            for con in x_con_iter {
-                con.add_cost(&mut s.q);
+            for x_con_next in x_con_iter {
+                x_con_next.add_cost(&mut s.q);
             }
             s.q.scale_mut(c.rho);
         } else {
@@ -330,8 +330,8 @@ where
         let mut u_con_iter = u_con.iter_mut();
         if let Some(u_con_first) = u_con_iter.next() {
             u_con_first.set_cost(&mut s.r);
-            for con in u_con_iter {
-                con.add_cost(&mut s.r);
+            for u_con_next in u_con_iter {
+                u_con_next.add_cost(&mut s.r);
             }
             s.r.scale_mut(c.rho);
         } else {
@@ -354,7 +354,7 @@ where
             // AmBKt * (p[i+1] + Plqr * w[i]) + q[i] - Klqr' * r[:,u_index]
             p_fut.gemv(T::one(), &c.Plqr, &s.w.column(i), T::one());
             c.AmBKt.mul_to(&p_fut, &mut p_now);
-            p_now.gemv(-T::one(), &c.Klqr.transpose(), &s.r.column(i.min(Hu - 1)), T::one());
+            p_now.gemv(T::one(), &c.Klqrt, &s.r.column(i.min(Hu - 1)), T::one());
             p_now += s.q.column(i);
 
             if i < Hu {
@@ -376,14 +376,24 @@ where
         // Roll out trajectory up to the control horizon (Hu)
         for i in 0..Hu {
             let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
-            s.eu.set_column(i, &(-&c.Klqr * &ex_now - s.d.column(i)));
-            ex_fut.copy_from(&(&s.A * &ex_now + &s.B * s.eu.column(i) + s.w.column(i)));
+            let mut u_col = s.eu.column_mut(i);
+
+            c.Klqr.mul_to(&ex_now, &mut u_col);
+            u_col -= s.d.column(i);
+
+            s.A.mul_to(&ex_now, &mut ex_fut);
+            ex_fut.gemv(T::one(), &s.B, &u_col, T::one());
+            ex_fut += s.w.column(i);
         }
 
         // Roll out rest of trajectory keeping u constant
         for i in Hu..Hx - 1 {
             let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
-            ex_fut.copy_from(&(&s.A * &ex_now + &s.B * s.eu.column(Hu - 1) + s.w.column(i)));
+            let u_col = s.eu.column(Hu - 1);
+
+            s.A.mul_to(&ex_now, &mut ex_fut);
+            ex_fut.gemv(T::one(), &s.B, &u_col, T::one());
+            ex_fut += s.w.column(i);
         }
     }
 
@@ -396,7 +406,7 @@ where
         x_con: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
         u_con: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
-        let update_res = self.should_calculate_residuals();
+        let compute_residuals = self.should_compute_residuals();
         let s = &mut self.state;
 
         // We are done using the cost matrices for this iteration,
@@ -405,11 +415,21 @@ where
         let x_scratch = &mut s.q;
 
         for con in x_con {
-            con.constrain(update_res, x_ref, s.ex.as_view());
+            con.constrain(
+                compute_residuals,
+                s.ex.as_view(),
+                x_ref,
+                x_scratch.as_view_mut(),
+            );
         }
 
         for con in u_con {
-            con.constrain(update_res, u_ref, s.eu.as_view());
+            con.constrain(
+                compute_residuals,
+                s.eu.as_view(),
+                u_ref,
+                u_scratch.as_view_mut(),
+            );
         }
     }
 
@@ -423,7 +443,7 @@ where
         let c = self.cache.get_active();
         let cfg = &self.config;
 
-        if !self.should_calculate_residuals() {
+        if !self.should_compute_residuals() {
             return false;
         }
 

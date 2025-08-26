@@ -225,41 +225,71 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
     /// Constrains the set of points, and if `update_res == true`, computes the maximum primal and dual residuals
     pub fn constrain(
         &mut self,
-        compute_residual: bool,
-        reference: SMatrixView<T, N, H>,
+        compute_residuals: bool,
         points: SMatrixView<T, N, H>,
+        reference: SMatrixView<T, N, H>,
+        scratch: SMatrixViewMut<T, N, H>,
     ) {
-        // Save old slac variables for computing dual residual
-        let old_slac = self.slac.clone_owned();
+        match compute_residuals {
+            true => self.constrain_do_calc_residual(points, reference, scratch),
+            false => self.constrain_no_calc_residual(points, reference),
+        }
+    }
+
+    /// Constrains the set of points, and if `update_res == true`, computes the maximum primal and dual residuals
+    fn constrain_do_calc_residual(
+        &mut self,
+        points: SMatrixView<T, N, H>,
+        reference: SMatrixView<T, N, H>,
+        mut scratch: SMatrixViewMut<T, N, H>,
+    ) {
+        // Initialize with old slac variables for computing dual residual
+        scratch.copy_from(&self.slac);
 
         // Offset the slack variables by the reference before projecting
-        self.slac = (points + reference) + self.dual;
+        points.add_to(&self.dual, &mut self.slac);
+        self.slac += &reference;
         self.projector.project(self.slac.as_view_mut());
-        self.slac -= reference;
+        self.slac -= &reference;
+
+        // Compute dual residual
+        scratch -= &self.slac;
+        scratch.apply(|t| *t = t.abs());
+        self.max_dual_residual = scratch.max();
 
         // Compute primal residual
-        let mut prim_residual = &points - self.slac;
+        points.sub_to(&self.slac, &mut scratch);
 
         // Update dual parameters
-        self.dual += &prim_residual;
+        self.dual += &scratch;
 
-        // Find maximum absolute residuals
-        if compute_residual {
-            // Compute primal residual
-            let mut dual_residual = &old_slac - self.slac;
+        // Compute primal residual
+        scratch.apply(|t| *t = t.abs());
+        self.max_prim_residual = scratch.max();
+    }
 
-            dual_residual.apply(|t| *t = t.abs());
-            self.max_dual_residual = dual_residual.max();
+    /// Constrains the set of points, updating the slack and dual variables
+    fn constrain_no_calc_residual(
+        &mut self,
+        points: SMatrixView<T, N, H>,
+        reference: SMatrixView<T, N, H>,
+    ) {
+        // Offset the slack variables by the reference before projecting
+        points.add_to(&self.dual, &mut self.slac);
+        self.slac += &reference;
+        self.projector.project(self.slac.as_view_mut());
+        self.slac -= &reference;
 
-            prim_residual.apply(|t| *t = t.abs());
-            self.max_prim_residual = prim_residual.max();
-        }
+        // Update dual parameters
+        self.dual += &points;
+        self.dual -= &self.slac;
     }
 
     /// Add the cost associated with this constraints violation to a cost sum
     pub(crate) fn add_cost<'a>(&mut self, cost: impl Into<SMatrixViewMut<'a, T, N, H>>) {
         let mut cost = cost.into();
-        cost += &self.dual - &self.slac;
+        cost += &self.dual;
+        cost -= &self.slac;
     }
 
     /// Add the cost associated with this constraints violation to a cost sum
