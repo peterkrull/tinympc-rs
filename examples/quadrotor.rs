@@ -1,8 +1,6 @@
 use nalgebra::{SMatrix, SVector, matrix, vector};
 use tinympc_rs::{
-    TinyMpc,
-    constraint::{Box, DynConstraint, Project},
-    rho_cache::LookupCache,
+    cache::LookupCache, constraint::DynConstraint, project::{Box, Project}, TinyMpc
 };
 
 /*
@@ -15,11 +13,13 @@ use tinympc_rs::{
 type Float = f32;
 
 const HX: usize = 10;
-const HU: usize = 10;
+const HU: usize = 9;
 
 fn main() {
+    type Cache = LookupCache<Float, 12, 4, 1>;
+    type Mpc = TinyMpc::<Float, Cache, 12, 4, HX, HU>;
     let mut mpc =
-        TinyMpc::<Float, LookupCache<Float, 12, 4, 9>, 12, 4, HX, HU>::new(A, B, Q, R, RHO)
+        Mpc::new(A, B, Q, R, RHO)
             .unwrap();
 
     // Configure settings
@@ -46,22 +46,23 @@ fn main() {
 
     let mut u_constraints = [DynConstraint::new(&ucon_box1)];
 
+    for i in 0..HX {
+        let reference = vector![0., 0., 2.0, 0., 0., 0., 0., 0., 0., 0., 0., 0.];
+        xref.set_column(i, &reference);
+    }
+
     let mut total_iters = 0;
     for k in 0..100 {
         // Run solvers
 
-        for i in 0..HX {
-            let mut reference = SVector::zeros();
-            reference[2] = ((i + k) as Float / 10.0).sin();
-            xref.set_column(i, &reference);
-        }
+
 
         let (reason, mut u) = mpc.solve(
             x,
             Some(xref.as_view()),
             None,
-            x_constraints.as_mut(),
-            u_constraints.as_mut(),
+            Some(x_constraints.as_mut()),
+            Some(u_constraints.as_mut()),
         );
         println!(
             "At step {k:3} in {:4} iterations, got tracking error : {:05.4} - {:?} with u:{:?}",
@@ -137,4 +138,4 @@ pub static Q: SVector<Float, 12> = vector! {100.0000000, 100.0000000, 100.000000
 
 pub static R: SVector<Float, 4> = vector! {4.0000000, 4.0000000, 4.0000000, 4.0000000};
 
-pub static RHO: Float = 8.0;
+pub static RHO: Float = 1.0;

@@ -7,18 +7,18 @@ use nalgebra::{
     RealField, SMatrix, SMatrixView, SVector, SVectorView, SVectorViewMut, Scalar, convert,
 };
 
-use crate::{
-    constraint::{Constraint, Project},
-    rho_cache::Cache,
-};
+use cache::Cache;
+use constraint::Constraint;
+use project::Project;
 
+pub mod cache;
 pub mod constraint;
-pub mod rho_cache;
+pub mod project;
 
 mod util;
 
-pub type LtiFn<F, const Nx: usize, const Nu: usize> =
-    fn(SVectorViewMut<F, Nx>, SVectorView<F, Nx>, SVectorView<F, Nu>);
+pub type LtiFn<T, const Nx: usize, const Nu: usize> =
+    fn(SVectorViewMut<T, Nx>, SVectorView<T, Nx>, SVectorView<T, Nu>);
 
 /// Errors that can occur during system setup
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -81,7 +81,14 @@ pub struct State<T, const Nx: usize, const Nu: usize, const Hx: usize, const Hu:
     B: SMatrix<T, Nx, Nu>,
     Bt: SMatrix<T, Nu, Nx>,
 
-    // Tracking dynamics mismatch
+    // For sparse system dynamics
+    sys: Option<LtiFn<T, Nx, Nu>>,
+
+    // State and input tracking error predictions
+    ex: SMatrix<T, Nx, Hx>,
+    eu: SMatrix<T, Nu, Hu>,
+
+    // State tracking dynamics mismatch
     w: SMatrix<T, Nx, Hx>,
 
     // Linear cost matrices
@@ -92,9 +99,6 @@ pub struct State<T, const Nx: usize, const Nu: usize, const Hx: usize, const Hu:
     p: SMatrix<T, Nx, Hx>,
     d: SMatrix<T, Nu, Hu>,
 
-    // State and input tracking error predictions
-    ex: SMatrix<T, Nx, Hx>,
-    eu: SMatrix<T, Nu, Hu>,
 
     // Number of iterations for latest solve
     iter: usize,
@@ -132,16 +136,19 @@ where
     XProj: Project<T, Nx, Hx>,
     UProj: Project<T, Nu, Hu>,
 {
+    /// Set the reference for state variables
     pub fn x_reference(mut self, x_ref: impl Into<SMatrixView<'a, T, Nx, Hx>>) -> Self {
         self.x_ref = Some(x_ref.into());
         self
     }
 
+    /// Set the reference for input variables
     pub fn u_reference(mut self, u_ref: impl Into<SMatrixView<'a, T, Nu, Hu>>) -> Self {
         self.u_ref = Some(u_ref.into());
         self
     }
 
+    /// Set constraints on the state variables
     pub fn x_constraints<Proj: Project<T, Nx, Hx>>(
         self,
         x_con: &'a mut [Constraint<T, Proj, Nx, Hx>],
@@ -156,6 +163,7 @@ where
         }
     }
 
+    /// Set constraints on the input variables
     pub fn u_constraints<Proj: Project<T, Nu, Hu>>(
         self,
         u_con: &'a mut [Constraint<T, Proj, Nu, Hu>],
@@ -170,12 +178,10 @@ where
         }
     }
 
-    /// Run the TinyMPC solver
-    pub fn solve(mut self) -> (TerminationReason, SVector<T, Nu>) {
-        let x_con = self.x_con.take().unwrap_or(&mut [][..]);
-        let u_con = self.u_con.take().unwrap_or(&mut [][..]);
+    /// Run the solver
+    pub fn solve(self) -> (TerminationReason, SVector<T, Nu>) {
         self.mpc
-            .solve(self.x_now, self.x_ref, self.u_ref, x_con, u_con)
+            .solve(self.x_now, self.x_ref, self.u_ref, self.x_con, self.u_con)
     }
 }
 
@@ -209,6 +215,7 @@ where
                 A,
                 B,
                 Bt: B.transpose(),
+                sys: None,
                 w: SMatrix::zeros(),
                 q: SMatrix::zeros(),
                 r: SMatrix::zeros(),
@@ -219,6 +226,11 @@ where
                 iter: 0,
             },
         })
+    }
+
+    pub fn with_sys(mut self, sys: LtiFn<T, Nx, Nu>) -> Self {
+        self.state.sys = Some(sys);
+        self
     }
 
     pub fn initial_condition(
@@ -239,31 +251,22 @@ where
         &mut self,
         x_now: SVector<T, Nx>,
         x_ref: Option<SMatrixView<T, Nx, Hx>>,
-        u_ref: Option<SMatrixView<T, Nu, Hu>>, // unused for now
-        x_con: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
-        u_con: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
+        u_ref: Option<SMatrixView<T, Nu, Hu>>,
+        x_con: Option<&mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>]>,
+        u_con: Option<&mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>]>,
     ) -> (TerminationReason, SVector<T, Nu>) {
         let mut reason = TerminationReason::MaxIters;
 
-        // For now assume we have a state reference
-        let u_ref = u_ref.unwrap();
-        let x_ref = x_ref.unwrap();
+        // We flatten the None variant into an empty slice
+        let x_con = x_con.unwrap_or(&mut [][..]);
+        let u_con = u_con.unwrap_or(&mut [][..]);
 
         // Set initial error state
-        self.state.ex.set_column(0, &(x_now - x_ref.column(0)));
-
-        // Construct tracking dynamics mismatch matrix (leaves last empty)
-        for i in 0..Hx - 1 {
-            let mut w_col = self.state.w.column_mut(i);
-            self.state.A.mul_to(&x_ref.column(i), &mut w_col);
-            w_col -= &x_ref.column(i + 1);
-        }
-
-        self.warm_start(x_con, u_con);
+        self.set_initial_conditions(x_now, x_ref, u_ref);
+        self.warm_start_constraints(x_con, u_con);
 
         self.state.iter = 0;
         while self.state.iter < self.config.max_iter {
-            // This goes first
             self.update_cost(x_con, u_con);
 
             self.backward_pass();
@@ -284,23 +287,52 @@ where
         (reason, self.get_u())
     }
 
+    #[inline]
     fn should_compute_residuals(&self) -> bool {
         self.state.iter % self.config.do_check == 0
     }
 
+    #[inline]
+    fn set_initial_conditions(&mut self, x_now: SVector<T, Nx>, x_ref: Option<SMatrixView<T, Nx, Hx>>, u_ref: Option<SMatrixView<T, Nu, Hu>>) {
+        if let Some(x_ref) = x_ref {
+            self.state.ex.set_column(0, &(x_now - x_ref.column(0)));
+            for i in 0..Hx - 1 {
+                let mut w_col = self.state.w.column_mut(i);
+                self.state.A.mul_to(&x_ref.column(i), &mut w_col);
+                w_col -= &x_ref.column(i + 1);
+            }
+        } else {
+            self.state.ex.set_column(0, &x_now);
+        }
+
+        if let Some(u_ref) = u_ref {
+            for i in 0..Hu {
+                let mut w_col = self.state.w.column_mut(i);
+                w_col.gemv(-T::one(), &self.state.B, &u_ref.column(i), T::one());
+            }
+
+            for i in Hu..Hx - 1 {
+                let mut w_col = self.state.w.column_mut(i);
+                w_col.gemv(-T::one(), &self.state.B, &u_ref.column(Hu - 1), T::one());
+            }
+        }
+    }
+
     /// Shift the dual variables by one time step for more accurate hot starting
     #[inline]
-    fn warm_start(
+    fn warm_start_constraints(
         &mut self,
         x_con: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
         u_con: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {
         for con in x_con {
             util::shift_columns_left(&mut con.dual);
+            util::shift_columns_left(&mut con.slac);
         }
 
         for con in u_con {
             util::shift_columns_left(&mut con.dual);
+            util::shift_columns_left(&mut con.slac);
         }
     }
 
@@ -373,27 +405,50 @@ where
         let s = &mut self.state;
         let c = self.cache.get_active();
 
-        // Roll out trajectory up to the control horizon (Hu)
-        for i in 0..Hu {
-            let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
-            let mut u_col = s.eu.column_mut(i);
+        if let Some(system) = s.sys {
+            // Roll out trajectory up to the control horizon (Hu)
+            for i in 0..Hu {
+                let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
+                let mut u_col = s.eu.column_mut(i);
 
-            c.Klqr.mul_to(&ex_now, &mut u_col);
-            u_col -= s.d.column(i);
+                c.Klqr.mul_to(&ex_now, &mut u_col);
+                u_col -= s.d.column(i);
 
-            s.A.mul_to(&ex_now, &mut ex_fut);
-            ex_fut.gemv(T::one(), &s.B, &u_col, T::one());
-            ex_fut += s.w.column(i);
-        }
+                system(ex_fut.as_view_mut(), ex_now.as_view(), u_col.as_view());
+                ex_fut += s.w.column(i)
+            }
 
-        // Roll out rest of trajectory keeping u constant
-        for i in Hu..Hx - 1 {
-            let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
-            let u_col = s.eu.column(Hu - 1);
+            // Roll out rest of trajectory keeping u constant
+            for i in Hu..Hx - 1 {
+                let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
+                let u_col = s.eu.column(Hu - 1);
 
-            s.A.mul_to(&ex_now, &mut ex_fut);
-            ex_fut.gemv(T::one(), &s.B, &u_col, T::one());
-            ex_fut += s.w.column(i);
+                system(ex_fut.as_view_mut(), ex_now.as_view(), u_col.as_view());
+                ex_fut += s.w.column(i)
+            }
+        } else {
+            // Roll out trajectory up to the control horizon (Hu)
+            for i in 0..Hu {
+                let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
+                let mut u_col = s.eu.column_mut(i);
+
+                c.Klqr.mul_to(&ex_now, &mut u_col);
+                u_col -= s.d.column(i);
+
+                s.A.mul_to(&ex_now, &mut ex_fut);
+                ex_fut.gemv(T::one(), &s.B, &u_col, T::one());
+                ex_fut += s.w.column(i);
+            }
+
+            // Roll out rest of trajectory keeping u constant
+            for i in Hu..Hx - 1 {
+                let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
+                let u_col = s.eu.column(Hu - 1);
+
+                s.A.mul_to(&ex_now, &mut ex_fut);
+                ex_fut.gemv(T::one(), &s.B, &u_col, T::one());
+                ex_fut += s.w.column(i);
+            }
         }
     }
 
@@ -401,8 +456,8 @@ where
     #[inline]
     fn update_constraints(
         &mut self,
-        x_ref: SMatrixView<T, Nx, Hx>,
-        u_ref: SMatrixView<T, Nu, Hu>,
+        x_ref: Option<SMatrixView<T, Nx, Hx>>,
+        u_ref: Option<SMatrixView<T, Nu, Hu>>,
         x_con: &mut [Constraint<T, impl Project<T, Nx, Hx>, Nx, Hx>],
         u_con: &mut [Constraint<T, impl Project<T, Nu, Hu>, Nu, Hu>],
     ) {

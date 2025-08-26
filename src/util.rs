@@ -60,9 +60,7 @@ pub(crate) fn try_array_from_fn<T: Sized, E, const N: usize>(
                 array[i].write(val);
             }
             Err(e) => {
-                // If the closure fails, we must drop the elements that
-                // were already successfully initialized.
-                // The slice `0..i` contains all the initialized elements.
+                // If the closure fails, we must drop the initialized elements.
                 for element in array.iter_mut().take(i) {
                     unsafe {
                         element.assume_init_drop();
@@ -74,10 +72,6 @@ pub(crate) fn try_array_from_fn<T: Sized, E, const N: usize>(
         }
     }
 
-    // If the loop completes, all elements are initialized, and we can
-    // safely transition from `[MaybeUninit<T>; N]` to `[T; N]`.
     // Safety: We've just initialized every element in the loop above.
-    let array = unsafe { array.map(|elem| elem.assume_init()) };
-
-    Ok(array)
+    Ok(unsafe { array.map(|elem| elem.assume_init()) })
 }

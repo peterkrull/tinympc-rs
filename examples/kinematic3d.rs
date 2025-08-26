@@ -4,8 +4,8 @@ use nalgebra::{SMatrix, SVector, SVectorView, SVectorViewMut, matrix, vector};
 use rerun::Color;
 use tinympc_rs::{
     Error, TinyMpc,
-    constraint::{Box, Project, ProjectExt as _, Sphere},
-    rho_cache::LookupCache,
+    project::{Project, ProjectExt as _, Sphere},
+    cache::LookupCache,
 };
 
 const HX: usize = 100;
@@ -57,7 +57,7 @@ fn sys(mut xnext: SVectorViewMut<f32, NX>, x: SVectorView<f32, NX>, u: SVectorVi
 
 const Q: SVector<f32, NX> = vector! {1., 1., 1., 0., 0., 0., 0., 0., 0.};
 const R: SVector<f32, NU> = vector! {1., 1., 1.,};
-const RHO: f32 = 2.0;
+const RHO: f32 = 4.0;
 
 fn main() -> Result<(), Error> {
     let rec = rerun::RecordingStreamBuilder::new("tinympc-constraints")
@@ -68,9 +68,9 @@ fn main() -> Result<(), Error> {
     type Cache = LookupCache<f32, NX, NU, NUM_CACHES>;
     type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
 
-    let mut mpc = Mpc::new(A, B, Q, R, RHO)?;
-    mpc.config.max_iter = 5;
-    mpc.config.do_check = 2;
+    let mut mpc = Mpc::new(A, B, Q, R, RHO)?.with_sys(sys);
+    mpc.config.max_iter = 4;
+    mpc.config.do_check = 1;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 
@@ -80,18 +80,12 @@ fn main() -> Result<(), Error> {
     #[rustfmt::skip]
     let x_project_sphere = Sphere {
         center: vector![None, None, None, Some(0.0), Some(0.0), Some(0.0), None, None, None],
-        radius: 6.0,
-    };
-
-    #[rustfmt::skip]
-    let x_project_box = Box {
-        upper: vector![Some(50.0), Some(50.0), Some(50.0), None, None, None, None, None, None],
-        lower: vector![Some(-50.0), Some(-50.0), Some(-50.0), None, None, None, None, None, None],
+        radius: 5.0,
     };
 
     // Two (or more!) projectors can be bundled together, saving a pair of slack/dual variables.
     // This should only be done if one constraint cannot immediately invalidate another constrant.
-    let x_projector_bundle = (x_project_sphere, x_project_box);
+    let x_projector_bundle = (x_project_sphere, );
 
     // We can also iteratively project a bundle if they could push each other out of feasible region
     // let x_projector_bundle = [&x_projector_bundle; 10];
@@ -108,25 +102,32 @@ fn main() -> Result<(), Error> {
 
     let mut total_iters = 0;
     let mut k = 0;
-    while k < 2500 {
+    while k < 5000 {
         k += 1;
 
         for i in 0..HX {
             let mut xref_col = SVector::zeros();
-            xref_col[0] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 500.)).sin() * 4.;
-            xref_col[1] = ((i + k) as f32 / 5.0 / (1.0 + (i + k) as f32 / 500.)).cos() * 4.;
+            xref_col[0] = ((i + k) as f32 / 25.0).sin() * 10.;
+            xref_col[1] = ((i + k) as f32 / 25.0).cos() * 10.;
             xref_col[2] = (i + k) as f32 / 100.0;
 
-            if i + k > 400 && i + k < 1200 {
-                xref_col[0] *= 2.0;
-            }
-
-            if i + k > 800 && i + k < 1500 {
-                xref_col[1] += -50.0;
-            }
-
-            if i + k > 2000 {
-                xref_col[2] = 49.0;
+            match ((i + k) / 500) % 4 {
+                0 => {
+                    xref_col[0] += 50.;
+                    xref_col[1] += 50.;
+                }
+                1 => {
+                    xref_col[0] -= 50.;
+                    xref_col[1] += 50.;
+                }
+                2 => {
+                    xref_col[0] -= 50.;
+                    xref_col[1] -= 50.;
+                }
+                _ => {
+                    xref_col[0] += 50.;
+                    xref_col[1] -= 50.;
+                }
             }
 
             xref.set_column(i, &xref_col);
@@ -138,12 +139,11 @@ fn main() -> Result<(), Error> {
             .initial_condition(x_now)
             .u_constraints(u_con.as_mut())
             .x_constraints(x_con.as_mut())
-            .u_reference(SMatrix::<f32, NU, HU>::zeros().as_view())
             .x_reference(xref.as_view())
             .solve();
 
         println!(
-            "Got solution: {:?} in {} ms) in {} iters",
+            "Got solution: {:?} in {} ms) in {} iters ({reason:?})",
             u_now.as_slice(),
             time.elapsed().as_micros() as f32 / 1e3,
             mpc.get_num_iters()
@@ -322,5 +322,3 @@ fn main() -> Result<(), Error> {
 
     Ok(())
 }
-
-
