@@ -1,4 +1,4 @@
-use nalgebra::{RealField, SMatrixViewMut, SVector, Unit};
+use nalgebra::{RealField, SMatrixViewMut, SVector};
 
 use crate::constraint::{Constraint, DynConstraint};
 
@@ -90,15 +90,13 @@ pub struct Box<T, const N: usize> {
 
 impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Box<T, N> {
     fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+        let lower = self.lower.map(|x| x.unwrap_or(T::min_value().unwrap()));
+        let upper = self.upper.map(|x| x.unwrap_or(T::max_value().unwrap()));
+
         for h in 0..H {
             let mut column = points.column_mut(h);
             for n in 0..N {
-                column[n] = match (self.lower[n], self.upper[n]) {
-                    (Some(min), Some(max)) => column[n].clamp(min, max),
-                    (Some(min), None) => column[n].max(min),
-                    (None, Some(max)) => column[n].min(max),
-                    (None, None) => continue,
-                };
+                column[n] = column[n].clamp(lower[n], upper[n]);
             }
         }
     }
@@ -163,21 +161,26 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for S
 
 /// A half-space constraint that is constant throughout the horizon
 #[derive(Debug, Copy, Clone)]
-pub struct HalfSpace<T, const N: usize> {
-    pub center: SVector<T, N>,
-    pub normal: Unit<SVector<T, N>>,
+pub struct Affine<T, const N: usize> {
+    pub normal: SVector<T, N>,
+    pub distance: T,
 }
 
-impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for HalfSpace<T, N> {
+impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Affine<T, N> {
     fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+        if self.normal.norm_squared().is_zero() {
+            return;
+        }
+        let normal = self.normal.normalize();
+
         for h in 0..H {
             let mut point = points.column_mut(h);
+            let dot = point.dot(&normal);
 
-            let centered = &point - self.center;
-            let dot = centered.dot(&self.normal);
-
-            if dot < T::zero() {
-                point -= self.normal.scale(dot)
+            if dot > self.distance {
+                // Project onto the boundary: move point towards the plane
+                let correction = normal.scale(dot - self.distance);
+                point -= correction;
             }
         }
     }
