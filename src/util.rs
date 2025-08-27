@@ -5,7 +5,7 @@ use nalgebra::{Const, Matrix, SMatrixViewMut, SVectorViewMut, Scalar, ViewStorag
 /// # Panics
 ///
 ///  if indices are out of bounds or if they are the same
-#[inline]
+#[inline(always)]
 pub(crate) fn column_pair_mut<'a, T: Scalar, const R: usize, const C: usize>(
     matrix: impl Into<SMatrixViewMut<'a, T, R, C>>,
     column0: usize,
@@ -30,7 +30,7 @@ pub(crate) fn column_pair_mut<'a, T: Scalar, const R: usize, const C: usize>(
 }
 
 /// Shifts all columns such that `column[i] <- column[i + 1]` with the last two being identical.
-#[inline]
+#[inline(always)]
 pub(crate) fn shift_columns_left<'a, T: Scalar, const R: usize, const C: usize>(
     matrix: impl Into<SMatrixViewMut<'a, T, R, C>>,
 ) {
@@ -48,7 +48,7 @@ pub(crate) fn shift_columns_left<'a, T: Scalar, const R: usize, const C: usize>(
 ///
 /// If a closure returns `Err`, this function will return that `Err`.
 /// All previously initialized elements will be properly dropped.
-#[inline]
+#[inline(always)]
 pub(crate) fn try_array_from_fn<T: Sized, E, const N: usize>(
     mut cb: impl FnMut(usize) -> Result<T, E>,
 ) -> Result<[T; N], E> {

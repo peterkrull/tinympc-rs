@@ -4,7 +4,7 @@ use nalgebra::{SMatrix, SVector, SVectorView, SVectorViewMut, matrix, vector};
 use rerun::Color;
 use tinympc_rs::{
     Error, TinyMpc,
-    cache::LookupCache,
+    cache::ArrayCache,
     project::{Affine, Box, Project, ProjectExt as _, Sphere},
 };
 
@@ -65,7 +65,7 @@ fn main() -> Result<(), Error> {
         .unwrap();
 
     const NUM_CACHES: usize = 5;
-    type Cache = LookupCache<f32, NX, NU, NUM_CACHES>;
+    type Cache = ArrayCache<f32, NX, NU, NUM_CACHES>;
     type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
 
     let mut mpc = Mpc::new(A, B, Q, R, RHO)?.with_sys(sys);
@@ -155,38 +155,37 @@ fn main() -> Result<(), Error> {
 
         let time = std::time::Instant::now();
 
-        let (reason, mut u_now) = mpc
+        let solution = mpc
             .initial_condition(x_now)
-            .u_constraints(u_con.as_mut())
-            .x_constraints(x_con.as_mut())
             .x_reference(xref.as_view())
+            .x_constraints(x_con.as_mut())
+            .u_constraints(u_con.as_mut())
             .solve();
 
-        total_iters += mpc.get_num_iters();
-
-        let xmatrix = mpc.get_x_matrix() + xref;
+        total_iters += solution.iterations;
 
         let mut iteration_cost = 0.0;
-        for col in xmatrix.column_iter() {
+        for col in solution.x_prediction().column_iter() {
             iteration_cost += (col.transpose() * SMatrix::from_diagonal(&Q) * col)[0];
         }
 
-        for col in mpc.get_u_matrix().column_iter() {
+        for col in solution.u_prediction().column_iter() {
             iteration_cost += (col.transpose() * SMatrix::from_diagonal(&R) * col)[0];
         }
 
         total_cost += iteration_cost;
 
         println!(
-            "Got solution: {:?} in {} ms) in {} iters ({reason:?}), cost: {}",
-            u_now.as_slice(),
+            "Got solution: {:?} in {} ms) in {} iters ({:?}), cost: {}",
+            solution.u_now().as_slice(),
             time.elapsed().as_micros() as f32 / 1e3,
-            mpc.get_num_iters(),
+            solution.iterations,
+            solution.reason,
             iteration_cost,
         );
 
         // Apply input to system
-        u_projector_sphere.project(u_now.as_view_mut());
+        let u_now = solution.u_now();
         x_now = A * x_now + B * u_now;
 
         // ------ RERUN VISUALIZATION -------

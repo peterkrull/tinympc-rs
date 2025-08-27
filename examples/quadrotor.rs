@@ -1,7 +1,7 @@
 use nalgebra::{SMatrix, SVector, matrix, vector};
 use tinympc_rs::{
     TinyMpc,
-    cache::LookupCache,
+    cache::ArrayCache,
     constraint::DynConstraint,
     project::{Box, Project},
 };
@@ -19,7 +19,7 @@ const HX: usize = 10;
 const HU: usize = 9;
 
 fn main() {
-    type Cache = LookupCache<Float, 12, 4, 1>;
+    type Cache = ArrayCache<Float, 12, 4, 1>;
     type Mpc = TinyMpc<Float, Cache, 12, 4, HX, HU>;
     let mut mpc = Mpc::new(A, B, Q, R, RHO).unwrap();
 
@@ -55,24 +55,27 @@ fn main() {
     let mut total_iters = 0;
     for k in 0..100 {
         // Run solvers
-        let (reason, mut u) = mpc.solve(
+        let solution = mpc.solve(
             x,
             Some(xref.as_view()),
             None,
             Some(x_constraints.as_mut()),
             Some(u_constraints.as_mut()),
         );
+
+        let mut u_now = solution.u_now();
+
         println!(
             "At step {k:3} in {:4} iterations, got tracking error : {:05.4} - {:?} with u:{:?}",
-            mpc.get_num_iters(),
+            solution.iterations,
             (x - xref.column(0)).norm(),
-            reason,
-            u
+            solution.iterations,
+            u_now
         );
 
         // Iterate simulation
-        ucon_box1.project(u.as_view_mut());
-        x = A * x + B * u;
+        ucon_box1.project(u_now.as_view_mut());
+        x = A * x + B * u_now;
 
         total_iters += mpc.get_num_iters();
     }

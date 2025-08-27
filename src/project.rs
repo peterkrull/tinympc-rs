@@ -89,6 +89,7 @@ pub struct Box<T, const N: usize> {
 }
 
 impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Box<T, N> {
+    #[inline(always)]
     fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
         let lower = self.lower.map(|x| x.unwrap_or(T::min_value().unwrap()));
         let upper = self.upper.map(|x| x.unwrap_or(T::max_value().unwrap()));
@@ -110,6 +111,7 @@ pub struct Sphere<T, const N: usize> {
 }
 
 impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Sphere<T, N> {
+    #[inline(always)]
     fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
         // Special case, just snap the points to the center coordinate
         if self.radius.is_zero() {
@@ -167,6 +169,7 @@ pub struct Affine<T, const N: usize> {
 }
 
 impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Affine<T, N> {
+    #[inline(always)]
     fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
         if self.normal.norm_squared().is_zero() {
             return;

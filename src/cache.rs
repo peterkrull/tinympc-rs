@@ -28,10 +28,10 @@ pub struct SingleCache<T, const NX: usize, const NU: usize> {
     pub(crate) rho: T,
 
     /// (Negated) Infinite-time horizon LQR gain
-    pub(crate) Klqr: SMatrix<T, NU, NX>,
+    pub(crate) nKlqr: SMatrix<T, NU, NX>,
 
     /// Transposed Infinite-time horizon LQR gain
-    pub(crate) Klqrt: SMatrix<T, NX, NU>,
+    pub(crate) nKlqrt: SMatrix<T, NX, NU>,
 
     /// Infinite-time horizon LQR cost-to-go
     pub(crate) Plqr: SMatrix<T, NX, NX>,
@@ -97,8 +97,8 @@ impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> Cache<T, NX
             .all(|x| x.is_finite())
             .then_some(SingleCache {
                 rho,
-                Klqr: -Klqr,
-                Klqrt: -Klqr.transpose(),
+                nKlqr: -Klqr,
+                nKlqrt: -Klqr.transpose(),
                 Plqr,
                 RpBPBi,
                 AmBKt,
@@ -115,16 +115,16 @@ impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> Cache<T, NX
     }
 }
 
-/// Contains all pre-computed values for a given problem and value of rho
+/// Contains an array of pre-computed values for a given problem and value of rho
 #[derive(Debug)]
-pub struct LookupCache<T, const NX: usize, const NU: usize, const NUM: usize> {
+pub struct ArrayCache<T, const NX: usize, const NU: usize, const NUM: usize> {
     threshold: T,
     active_index: usize,
     caches: [SingleCache<T, NX, NU>; NUM],
 }
 
 impl<T, const NX: usize, const NU: usize, const NUM: usize> Cache<T, NX, NU>
-    for LookupCache<T, NX, NU, NUM>
+    for ArrayCache<T, NX, NU, NUM>
 where
     T: Scalar + RealField + Copy,
 {
@@ -141,7 +141,7 @@ where
 
         let caches = crate::util::try_array_from_fn(|index| {
             let diff = index as i32 - active_index as i32;
-            let expo = convert::<f64, T>(2.0).powf(convert(diff as f64));
+            let expo = convert::<f64, T>(1.6).powf(convert(diff as f64));
             let rho = central_rho * expo;
             SingleCache::new(rho, iters, A, B, Q, R) // returns error
         })?;
@@ -153,6 +153,7 @@ where
         })
     }
 
+    #[inline(always)]
     fn update_active(&mut self, prim_residual: T, dual_residual: T) -> Option<T> {
         let mut cache = &self.caches[self.active_index];
         let prev_rho = cache.rho;
@@ -179,6 +180,7 @@ where
         (prev_rho != cache.rho).then(|| prev_rho / cache.rho)
     }
 
+    #[inline(always)]
     fn get_active(&self) -> &SingleCache<T, NX, NU> {
         &self.caches[self.active_index]
     }

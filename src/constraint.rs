@@ -44,6 +44,7 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
     }
 
     /// Constrains the set of points, and if `compute_residuals == true`, computes the maximum primal and dual residuals
+    #[inline(always)]
     pub fn constrain(
         &mut self,
         compute_residuals: bool,
@@ -58,6 +59,7 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
     }
 
     /// Constrains the set of points, and computes the maximum primal and dual residuals
+    #[inline(always)]
     fn constrain_calc_residuals(
         &mut self,
         points: SMatrixView<T, N, H>,
@@ -94,6 +96,7 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
     }
 
     /// Constrains the set of points
+    #[inline(always)]
     fn constrain_only(
         &mut self,
         points: SMatrixView<T, N, H>,
@@ -115,18 +118,21 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
     }
 
     /// Add the cost associated with this constraints violation to a cost sum
-    pub(crate) fn add_cost<'a>(&mut self, cost: impl Into<SMatrixViewMut<'a, T, N, H>>) {
+    #[inline(always)]
+    pub(crate) fn add_cost<'a>(&self, cost: impl Into<SMatrixViewMut<'a, T, N, H>>) {
         let mut cost = cost.into();
         cost += &self.dual;
         cost -= &self.slac;
     }
 
     /// Add the cost associated with this constraints violation to a cost sum
+    #[inline(always)]
     pub(crate) fn set_cost<'a>(&mut self, cost: impl Into<SMatrixViewMut<'a, T, N, H>>) {
         self.dual.sub_to(&self.slac, &mut cost.into());
     }
 
     /// Re-scale the dual variables for when the value of rho has changed
+    #[inline(always)]
     pub(crate) fn rescale_dual(&mut self, scalar: T) {
         self.dual.scale_mut(scalar);
     }

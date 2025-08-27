@@ -176,7 +176,7 @@ where
     }
 
     /// Run the solver
-    pub fn solve(self) -> (TerminationReason, SVector<T, NU>) {
+    pub fn solve(self) -> Solution<'a, T, NX, NU, HX, HU> {
         self.mpc
             .solve(self.x_now, self.x_ref, self.u_ref, self.x_con, self.u_con)
     }
@@ -187,6 +187,7 @@ impl<T, C: Cache<T, NX, NU>, const NX: usize, const NU: usize, const HX: usize, 
 where
     T: Scalar + RealField + Copy,
 {
+    #[inline(always)]
     #[must_use = "Creatig a new TinyMpc type without assigning it does nothing"]
     pub fn new(
         A: SMatrix<T, NX, NX>,
@@ -202,8 +203,8 @@ where
 
         Ok(Self {
             config: Config {
-                prim_tol: convert(1e-3),
-                dual_tol: convert(1e-3),
+                prim_tol: convert(1e-2),
+                dual_tol: convert(1e-2),
                 max_iter: 50,
                 do_check: 5,
             },
@@ -230,6 +231,7 @@ where
         self
     }
 
+    #[inline(always)]
     pub fn initial_condition(
         &mut self,
         x_now: SVector<T, NX>,
@@ -244,21 +246,22 @@ where
         }
     }
 
-    pub fn solve(
-        &mut self,
+    #[inline(always)]
+    pub fn solve<'a>(
+        &'a mut self,
         x_now: SVector<T, NX>,
-        x_ref: Option<SMatrixView<T, NX, HX>>,
-        u_ref: Option<SMatrixView<T, NU, HU>>,
+        x_ref: Option<SMatrixView<'a, T, NX, HX>>,
+        u_ref: Option<SMatrixView<'a, T, NU, HU>>,
         x_con: Option<&mut [Constraint<T, impl Project<T, NX, HX>, NX, HX>]>,
         u_con: Option<&mut [Constraint<T, impl Project<T, NU, HU>, NU, HU>]>,
-    ) -> (TerminationReason, SVector<T, NU>) {
+    ) -> Solution<'a, T, NX, NU, HX, HU> {
         let mut reason = TerminationReason::MaxIters;
 
         // We flatten the None variant into an empty slice
         let x_con = x_con.unwrap_or(&mut [][..]);
         let u_con = u_con.unwrap_or(&mut [][..]);
 
-        // Set initial error state
+        // Set initial error state and warm-start constraints
         self.set_initial_conditions(x_now, x_ref, u_ref);
         self.warm_start_constraints(x_con, u_con);
 
@@ -281,15 +284,24 @@ where
             self.state.iter += 1;
         }
 
-        (reason, self.get_u())
+        Solution {
+            x_ref,
+            u_ref,
+            x: self.state.ex.as_view(),
+            u: self.state.eu.as_view(),
+            reason,
+            iterations: self.state.iter,
+            prim_residual: T::zero(),
+            dual_residual: T::zero(),
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     fn should_compute_residuals(&self) -> bool {
         self.state.iter % self.config.do_check == 0
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_initial_conditions(
         &mut self,
         x_now: SVector<T, NX>,
@@ -321,7 +333,7 @@ where
     }
 
     /// Shift the dual variables by one time step for more accurate hot starting
-    #[inline]
+    #[inline(always)]
     fn warm_start_constraints(
         &mut self,
         x_con: &mut [Constraint<T, impl Project<T, NX, HX>, NX, HX>],
@@ -339,7 +351,7 @@ where
     }
 
     /// Update linear control cost terms based on constraint violations
-    #[inline]
+    #[inline(always)]
     fn update_cost(
         &mut self,
         x_con: &mut [Constraint<T, impl Project<T, NX, HX>, NX, HX>],
@@ -377,24 +389,27 @@ where
     }
 
     /// Backward pass to update Ricatti variables
-    #[inline]
+    #[inline(always)]
     fn backward_pass(&mut self) {
         let s = &mut self.state;
         let c = self.cache.get_active();
 
         for i in (0..HX - 1).rev() {
             let (mut p_now, mut p_fut) = util::column_pair_mut(&mut s.p, i, i + 1);
+            let mut r_col = s.r.column_mut(i.min(HU - 1));
 
-            // AmBKt * (p[i+1] + Plqr * w[i]) + q[i] - Klqr' * r[:,u_index]
+            // Reused calculation: [[[i+1]]] <= (p[i+1] + Plqr * w[i])
             p_fut.gemv(T::one(), &c.Plqr, &s.w.column(i), T::one());
+
+            // Calc: p[i] = AmBKt * [[[i+1]]] + q[i] - Klqr' * r[:,u_index]
             c.AmBKt.mul_to(&p_fut, &mut p_now);
-            p_now.gemv(T::one(), &c.Klqrt, &s.r.column(i.min(HU - 1)), T::one());
+            p_now.gemv(T::one(), &c.nKlqrt, &r_col, T::one());
             p_now += s.q.column(i);
 
             if i < HU {
-                let mut r_col = s.r.column_mut(i);
                 let mut d_col = s.d.column_mut(i);
 
+                // Calc: d[i] = RpBPBi * (B' * [[[i+1]]] + r[i])
                 r_col.gemv(T::one(), &s.Bt, &p_fut, T::one());
                 c.RpBPBi.mul_to(&r_col, &mut d_col);
             }
@@ -402,7 +417,7 @@ where
     }
 
     /// Use LQR feedback policy to roll out trajectory
-    #[inline]
+    #[inline(always)]
     fn forward_pass(&mut self) {
         let s = &mut self.state;
         let c = self.cache.get_active();
@@ -413,7 +428,7 @@ where
                 let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
                 let mut u_col = s.eu.column_mut(i);
 
-                c.Klqr.mul_to(&ex_now, &mut u_col);
+                c.nKlqr.mul_to(&ex_now, &mut u_col);
                 u_col -= s.d.column(i);
 
                 system(ex_fut.as_view_mut(), ex_now.as_view(), u_col.as_view());
@@ -434,7 +449,7 @@ where
                 let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
                 let mut u_col = s.eu.column_mut(i);
 
-                c.Klqr.mul_to(&ex_now, &mut u_col);
+                c.nKlqr.mul_to(&ex_now, &mut u_col);
                 u_col -= s.d.column(i);
 
                 s.A.mul_to(&ex_now, &mut ex_fut);
@@ -455,7 +470,7 @@ where
     }
 
     /// Project slack variables into their feasible domain and update dual variables
-    #[inline]
+    #[inline(always)]
     fn update_constraints(
         &mut self,
         x_ref: Option<SMatrixView<T, NX, HX>>,
@@ -491,7 +506,7 @@ where
     }
 
     /// Check for termination condition by evaluating residuals
-    #[inline]
+    #[inline(always)]
     fn check_termination(
         &mut self,
         x_con: &mut [Constraint<T, impl Project<T, NX, HX>, NX, HX>],
@@ -563,5 +578,47 @@ where
     /// Get reference to matrix containing input predictions
     pub fn get_u_matrix(&self) -> &SMatrix<T, NU, HU> {
         &self.state.eu
+    }
+}
+
+pub struct Solution<'a, T, const NX: usize, const NU: usize, const HX: usize, const HU: usize> {
+    x_ref: Option<SMatrixView<'a, T, NX, HX>>,
+    u_ref: Option<SMatrixView<'a, T, NU, HU>>,
+    x: SMatrixView<'a, T, NX, HX>,
+    u: SMatrixView<'a, T, NU, HU>,
+    pub reason: TerminationReason,
+    pub iterations: usize,
+    pub prim_residual: T,
+    pub dual_residual: T,
+}
+
+impl<T: RealField + Copy, const NX: usize, const NU: usize, const HX: usize, const HU: usize>
+    Solution<'_, T, NX, NU, HX, HU>
+{
+    /// Get the predictiction of states for this solution
+    pub fn x_prediction(&self) -> SMatrix<T, NX, HX> {
+        if let Some(x_ref) = self.x_ref.as_ref() {
+            self.x + x_ref
+        } else {
+            self.x.clone_owned()
+        }
+    }
+
+    /// Get the predictiction of inputs for this solution
+    pub fn u_prediction(&self) -> SMatrix<T, NU, HU> {
+        if let Some(u_ref) = self.u_ref.as_ref() {
+            self.u + u_ref
+        } else {
+            self.u.clone_owned()
+        }
+    }
+
+    /// Get the current contron input to be applied
+    pub fn u_now(&self) -> SVector<T, NU> {
+        if let Some(u_ref) = self.u_ref.as_ref() {
+            self.u.column(0) + u_ref.column(0)
+        } else {
+            self.u.column(0).into()
+        }
     }
 }
