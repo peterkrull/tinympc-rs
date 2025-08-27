@@ -2,14 +2,14 @@ use nalgebra::{RealField, SMatrix, SVector, Scalar, convert};
 
 use crate::Error;
 
-pub trait Cache<T, const Nx: usize, const Nu: usize>: Sized {
+pub trait Cache<T, const NX: usize, const NU: usize>: Sized {
     fn new(
         rho: T,
         iters: usize,
-        A: &SMatrix<T, Nx, Nx>,
-        B: &SMatrix<T, Nx, Nu>,
-        Q: &SVector<T, Nx>,
-        R: &SVector<T, Nu>,
+        A: &SMatrix<T, NX, NX>,
+        B: &SMatrix<T, NX, NU>,
+        Q: &SVector<T, NX>,
+        R: &SVector<T, NU>,
     ) -> Result<Self, Error>;
 
     /// Updates which cache is active by evaluating the primal and dual residuals.
@@ -18,41 +18,41 @@ pub trait Cache<T, const Nx: usize, const Nu: usize>: Sized {
     fn update_active(&mut self, prim_residual: T, dual_residual: T) -> Option<T>;
 
     /// Get a reference to the currently active cache.
-    fn get_active(&self) -> &SingleCache<T, Nx, Nu>;
+    fn get_active(&self) -> &SingleCache<T, NX, NU>;
 }
 
 /// Contains all pre-computed values for a given problem and value of rho
 #[derive(Debug)]
-pub struct SingleCache<T, const Nx: usize, const Nu: usize> {
+pub struct SingleCache<T, const NX: usize, const NU: usize> {
     /// Penalty-parameter for this cache
     pub(crate) rho: T,
 
     /// (Negated) Infinite-time horizon LQR gain
-    pub(crate) Klqr: SMatrix<T, Nu, Nx>,
+    pub(crate) Klqr: SMatrix<T, NU, NX>,
 
     /// Transposed Infinite-time horizon LQR gain
-    pub(crate) Klqrt: SMatrix<T, Nx, Nu>,
+    pub(crate) Klqrt: SMatrix<T, NX, NU>,
 
     /// Infinite-time horizon LQR cost-to-go
-    pub(crate) Plqr: SMatrix<T, Nx, Nx>,
+    pub(crate) Plqr: SMatrix<T, NX, NX>,
 
     /// Precomputed `inv(R_aug + B^T * Plqr * B)`
-    pub(crate) RpBPBi: SMatrix<T, Nu, Nu>,
+    pub(crate) RpBPBi: SMatrix<T, NU, NU>,
 
     /// Precomputed `(A - B * Klqr)^T`
-    pub(crate) AmBKt: SMatrix<T, Nx, Nx>,
+    pub(crate) AmBKt: SMatrix<T, NX, NX>,
 }
 
-impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx, Nu>
-    for SingleCache<T, Nx, Nu>
+impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> Cache<T, NX, NU>
+    for SingleCache<T, NX, NU>
 {
     fn new(
         rho: T,
         iters: usize,
-        A: &SMatrix<T, Nx, Nx>,
-        B: &SMatrix<T, Nx, Nu>,
-        Q: &SVector<T, Nx>,
-        R: &SVector<T, Nu>,
+        A: &SMatrix<T, NX, NX>,
+        B: &SMatrix<T, NX, NU>,
+        Q: &SVector<T, NX>,
+        R: &SVector<T, NU>,
     ) -> Result<Self, Error> {
         if !rho.is_positive() {
             return Err(Error::RhoNotPositiveDefinite);
@@ -110,31 +110,31 @@ impl<T: Scalar + RealField + Copy, const Nx: usize, const Nu: usize> Cache<T, Nx
         None
     }
 
-    fn get_active(&self) -> &SingleCache<T, Nx, Nu> {
+    fn get_active(&self) -> &SingleCache<T, NX, NU> {
         self
     }
 }
 
 /// Contains all pre-computed values for a given problem and value of rho
 #[derive(Debug)]
-pub struct LookupCache<T, const Nx: usize, const Nu: usize, const NUM: usize> {
+pub struct LookupCache<T, const NX: usize, const NU: usize, const NUM: usize> {
     threshold: T,
     active_index: usize,
-    caches: [SingleCache<T, Nx, Nu>; NUM],
+    caches: [SingleCache<T, NX, NU>; NUM],
 }
 
-impl<T, const Nx: usize, const Nu: usize, const NUM: usize> Cache<T, Nx, Nu>
-    for LookupCache<T, Nx, Nu, NUM>
+impl<T, const NX: usize, const NU: usize, const NUM: usize> Cache<T, NX, NU>
+    for LookupCache<T, NX, NU, NUM>
 where
     T: Scalar + RealField + Copy,
 {
     fn new(
         central_rho: T,
         iters: usize,
-        A: &SMatrix<T, Nx, Nx>,
-        B: &SMatrix<T, Nx, Nu>,
-        Q: &SVector<T, Nx>,
-        R: &SVector<T, Nu>,
+        A: &SMatrix<T, NX, NX>,
+        B: &SMatrix<T, NX, NU>,
+        Q: &SVector<T, NX>,
+        R: &SVector<T, NU>,
     ) -> Result<Self, Error> {
         let threshold = convert(10.0);
         let active_index = NUM / 2;
@@ -179,7 +179,7 @@ where
         (prev_rho != cache.rho).then(|| prev_rho / cache.rho)
     }
 
-    fn get_active(&self) -> &SingleCache<T, Nx, Nu> {
+    fn get_active(&self) -> &SingleCache<T, NX, NU> {
         &self.caches[self.active_index]
     }
 }
