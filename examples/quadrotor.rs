@@ -1,6 +1,9 @@
 use nalgebra::{SMatrix, SVector, matrix, vector};
 use tinympc_rs::{
-    cache::LookupCache, constraint::DynConstraint, project::{Box, Project}, TinyMpc
+    TinyMpc,
+    cache::LookupCache,
+    constraint::DynConstraint,
+    project::{Box, Project},
 };
 
 /*
@@ -17,10 +20,8 @@ const HU: usize = 9;
 
 fn main() {
     type Cache = LookupCache<Float, 12, 4, 1>;
-    type Mpc = TinyMpc::<Float, Cache, 12, 4, HX, HU>;
-    let mut mpc =
-        Mpc::new(A, B, Q, R, RHO)
-            .unwrap();
+    type Mpc = TinyMpc<Float, Cache, 12, 4, HX, HU>;
+    let mut mpc = Mpc::new(A, B, Q, R, RHO).unwrap();
 
     // Configure settings
     mpc.config.max_iter = 20;
@@ -54,9 +55,6 @@ fn main() {
     let mut total_iters = 0;
     for k in 0..100 {
         // Run solvers
-
-
-
         let (reason, mut u) = mpc.solve(
             x,
             Some(xref.as_view()),

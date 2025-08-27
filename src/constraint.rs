@@ -43,7 +43,7 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
         self.dual = SMatrix::zeros();
     }
 
-    /// Constrains the set of points, and if `update_res == true`, computes the maximum primal and dual residuals
+    /// Constrains the set of points, and if `compute_residuals == true`, computes the maximum primal and dual residuals
     pub fn constrain(
         &mut self,
         compute_residuals: bool,
@@ -52,13 +52,13 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
         scratch: SMatrixViewMut<T, N, H>,
     ) {
         match compute_residuals {
-            true => self.constrain_do_calc_residual(points, reference, scratch),
-            false => self.constrain_no_calc_residual(points, reference),
+            true => self.constrain_calc_residuals(points, reference, scratch),
+            false => self.constrain_only(points, reference),
         }
     }
 
-    /// Constrains the set of points, and if `update_res == true`, computes the maximum primal and dual residuals
-    fn constrain_do_calc_residual(
+    /// Constrains the set of points, and computes the maximum primal and dual residuals
+    fn constrain_calc_residuals(
         &mut self,
         points: SMatrixView<T, N, H>,
         reference: Option<SMatrixView<T, N, H>>,
@@ -73,7 +73,6 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
             self.slac += &reference;
             self.projector.project(self.slac.as_view_mut());
             self.slac -= &reference;
-
         } else {
             self.projector.project(self.slac.as_view_mut());
         }
@@ -94,8 +93,8 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
         self.max_prim_residual = scratch.max();
     }
 
-    /// Constrains the set of points, updating the slack and dual variables
-    fn constrain_no_calc_residual(
+    /// Constrains the set of points
+    fn constrain_only(
         &mut self,
         points: SMatrixView<T, N, H>,
         reference: Option<SMatrixView<T, N, H>>,

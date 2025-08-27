@@ -99,7 +99,6 @@ pub struct State<T, const Nx: usize, const Nu: usize, const Hx: usize, const Hu:
     p: SMatrix<T, Nx, Hx>,
     d: SMatrix<T, Nu, Hu>,
 
-
     // Number of iterations for latest solve
     iter: usize,
 }
@@ -293,7 +292,12 @@ where
     }
 
     #[inline]
-    fn set_initial_conditions(&mut self, x_now: SVector<T, Nx>, x_ref: Option<SMatrixView<T, Nx, Hx>>, u_ref: Option<SMatrixView<T, Nu, Hu>>) {
+    fn set_initial_conditions(
+        &mut self,
+        x_now: SVector<T, Nx>,
+        x_ref: Option<SMatrixView<T, Nx, Hx>>,
+        u_ref: Option<SMatrixView<T, Nu, Hu>>,
+    ) {
         if let Some(x_ref) = x_ref {
             self.state.ex.set_column(0, &(x_now - x_ref.column(0)));
             for i in 0..Hx - 1 {
@@ -406,7 +410,6 @@ where
         let c = self.cache.get_active();
 
         if let Some(system) = s.sys {
-
             // Roll out trajectory up to the control horizon (Hu)
             for i in 0..Hu {
                 let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
