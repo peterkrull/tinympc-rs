@@ -13,8 +13,8 @@ const NX: usize = //..
 const NU: usize = //..
 
 // System dynamics
-const A: SMatrix<f32, NX, NX> = na::matrix![..];
-const B: SMatrix<f32, NX, NU> = na::vector![..];
+const A: na::SMatrix<f32, NX, NX> = na::matrix![..];
+const B: na::SMatrix<f32, NX, NU> = na::vector![..];
 ```
 
 For LQR and MPC we typically have a cost matrix associated with the state and input deviating from their references. For simplicity these are defined using vectors representing the diagonal of such matrices. 
@@ -22,8 +22,8 @@ For LQR and MPC we typically have a cost matrix associated with the state and in
 
 ```rust
 // State and input error cost vectors
-const Q: SVector<f32, NX> = na::vector![..];
-const R: SVector<f32, NU> = na::vector![..];
+const Q: na::SVector<f32, NX> = na::vector![..];
+const R: na::SVector<f32, NU> = na::vector![..];
 ```
 
 We define the prediction horizon length $H_x$ and control horizon length $H_u$ where $H_x > H_u$. We also choose an ADMM penalty parameter $\rho$ (`rho`), and choose a caching strategy. Here we use the const-sized `LookupCache` with 5 elements.
@@ -78,32 +78,32 @@ let u_projector = Box {
 // the dual and slack variables needed by the optimizer
 // internally. These are arraya since we can also provide
 // multiple individual constraints.
-let mut xcon = [x_projector.constraint()];
-let mut ucon = [u_projector.constraint()];
+let mut x_con = [x_projector.constraint()];
+let mut u_con = [u_projector.constraint()];
 ```
 
-With everything set up, we just need to run it! For this example we want our states to track a reference trajectory defined by the matrix `xref` below. We also have the option to provide a reference to the inputs. Now, all of the magic (math and optimizations) lies under the hood of that call to `solve()`.
+With everything set up, we just need to run it! For this example we want our states to track a reference trajectory defined by the matrix `x_ref` below. We also have the option to provide a reference to the inputs. Now, all of the magic (math and optimizations) lies under the hood of that call to `solve()`.
 
 ```rust
 loop {
     // Recalculate/shift the reference one step forward
-    let xref: SMatrix<f32, NX, HX>; = //..
+    let xref: na::SMatrix<f32, NX, HX>; = //..
 
     // Get our state for this run
     system.next_sampling_time().await;
-    let xnow = system.read_state();
+    let x_now = system.read_state();
 
     // Feed the initial condition, constraints and reference
     // into the MPC and run `solve()` to start converging
     // towards the optimal solution!
-    let (reason, unow) = mpc
+    let (reason, u_now) = mpc
         .initial_condition(xnow)
-        .u_constraints(ucon.as_mut())
-        .x_constraints(xcon.as_mut())
-        .x_reference(xref.as_view())
+        .u_constraints(u_con.as_mut())
+        .x_constraints(x_con.as_mut())
+        .x_reference(x_ref.as_view())
         .solve();
 
     // Use the actuation command
-    system.set_output(unow);
+    system.set_output(u_now);
 }
 ```
