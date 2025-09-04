@@ -5,35 +5,18 @@ use nalgebra::{
     RealField, SMatrix, SMatrixView, SVector, SVectorView, SVectorViewMut, Scalar, convert,
 };
 
-use cache::Cache;
-use constraint::Constraint;
-use project::Project;
-
 pub mod cache;
 pub mod constraint;
 pub mod project;
+
+pub use cache::{Cache, Error};
+pub use constraint::Constraint;
+pub use project::*;
 
 mod util;
 
 pub type LtiFn<T, const NX: usize, const NU: usize> =
     fn(SVectorViewMut<T, NX>, SVectorView<T, NX>, SVectorView<T, NU>);
-
-/// Errors that can occur during system setup
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum Error {
-    /// The value of HX must be larger than HU `(HX > HU && HU > 0)`
-    InvalidHorizonLength,
-    /// The value of rho must be strictly positive `(rho > 0)`
-    RhoNotPositiveDefinite,
-    /// The entries of Q must be non-negative `all(Q) >= 0`
-    QNotPositiveSemidefinite,
-    /// The entries of Q must be strictly positive `all(R) > 0`
-    RNotPositiveDefinite,
-    /// The matrix `R_aug + B^T * P * B` is not invertible
-    RpBPBNotInvertible,
-    /// The resulting matrices contained non-finite elements (Inf or NaN)
-    NonFiniteValues,
-}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TerminationReason {
@@ -62,7 +45,7 @@ pub struct Config<T> {
     /// The convergence tolerance for the primal residual (default 0.001)
     pub prim_tol: T,
 
-    /// The convergence tolerance for the dual residual  (default 0.001)
+    /// The convergence tolerance for the dual residual (default 0.001)
     pub dual_tol: T,
 
     /// Maximum iterations without converging before terminating (default 50)
@@ -70,6 +53,9 @@ pub struct Config<T> {
 
     /// Number of iterations between evaluating convergence (default 5)
     pub do_check: usize,
+
+    /// Relaxation, values `1.5-1.8` may improve convergence (default 1.0)
+    pub relaxation: T,
 }
 
 #[derive(Debug)]
@@ -187,28 +173,25 @@ impl<T, C: Cache<T, NX, NU>, const NX: usize, const NU: usize, const HX: usize, 
 where
     T: Scalar + RealField + Copy,
 {
+    #[must_use]
     #[inline(always)]
-    #[must_use = "Creatig a new TinyMpc type without assigning it does nothing"]
-    pub fn new(
-        A: SMatrix<T, NX, NX>,
-        B: SMatrix<T, NX, NU>,
-        Q: SVector<T, NX>,
-        R: SVector<T, NU>,
-        rho: T,
-    ) -> Result<Self, Error> {
-        // Guard against invalid horizon lengths
-        if HX <= HU || HU == 0 {
-            return Err(Error::InvalidHorizonLength);
+    pub fn new(A: SMatrix<T, NX, NX>, B: SMatrix<T, NX, NU>, cache: C) -> Self {
+
+        // Compile-time guard against invalid horizon lengths
+        const {
+            assert!(HX > HU, "The prediction horizon `HX` must be larger than the control horizon `HU`");
+            assert!(HU > 0, "The control horizon `HU` must be non-zero");
         }
 
-        Ok(Self {
+        Self {
             config: Config {
                 prim_tol: convert(1e-2),
                 dual_tol: convert(1e-2),
                 max_iter: 50,
                 do_check: 5,
+                relaxation: T::one(),
             },
-            cache: C::new(rho, HX, &A, &B, &Q, &R)?,
+            cache,
             state: State {
                 A,
                 B,
@@ -223,7 +206,7 @@ where
                 eu: SMatrix::zeros(),
                 iter: 0,
             },
-        })
+        }
     }
 
     pub fn with_sys(mut self, sys: LtiFn<T, NX, NU>) -> Self {
@@ -398,6 +381,7 @@ where
             let (mut p_now, mut p_fut) = util::column_pair_mut(&mut s.p, i, i + 1);
             let mut r_col = s.r.column_mut(i.min(HU - 1));
 
+            // TODO: Cache the Plqr * w[i] term as long as RHO stays constant
             // Reused calculation: [[[i+1]]] <= (p[i+1] + Plqr * w[i])
             p_fut.gemv(T::one(), &c.Plqr, &s.w.column(i), T::one());
 
@@ -481,27 +465,41 @@ where
         let compute_residuals = self.should_compute_residuals();
         let s = &mut self.state;
 
-        // We are done using the cost matrices for this iteration,
-        // so they can safely be used as scratch buffers.
-        let u_scratch = &mut s.r;
-        let x_scratch = &mut s.q;
+        let (x_points, u_points) = if self.config.relaxation != T::one() {
+            // Use Riccati matrices to store relaxed x and u matrices.
+            s.q.copy_from(&s.ex);
+            s.r.copy_from(&s.eu);
+
+            let alpha = self.config.relaxation;
+
+            s.q.scale_mut(alpha);
+            s.r.scale_mut(alpha);
+
+            for con in x_con.as_mut() {
+                s.q += con.slac.scale(T::one() - alpha);
+            }
+
+            for con in u_con.as_mut() {
+                s.r += con.slac.scale(T::one() - alpha);
+            }
+
+            // Buffers now contain: x' = alpha * x + (1 - alpha) * z
+            (s.q.as_view(), s.r.as_view())
+        } else {
+            // Just use original predictions
+            (s.ex.as_view(), s.eu.as_view())
+        };
+
+        // Use cost matrices as scratch buffers
+        let u_scratch = &mut s.d;
+        let x_scratch = &mut s.p;
 
         for con in x_con {
-            con.constrain(
-                compute_residuals,
-                s.ex.as_view(),
-                x_ref,
-                x_scratch.as_view_mut(),
-            );
+            con.constrain(compute_residuals, x_points, x_ref, x_scratch.as_view_mut());
         }
 
         for con in u_con {
-            con.constrain(
-                compute_residuals,
-                s.eu.as_view(),
-                u_ref,
-                u_scratch.as_view_mut(),
-            );
+            con.constrain(compute_residuals, u_points, u_ref, u_scratch.as_view_mut());
         }
     }
 

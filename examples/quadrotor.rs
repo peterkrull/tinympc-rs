@@ -20,8 +20,21 @@ const HU: usize = 9;
 
 fn main() {
     type Cache = ArrayCache<Float, 12, 4, 1>;
+    let cache = Cache::new(
+        RHO,
+        10.0,
+        1.8,
+        HX,
+        &A,
+        &B,
+        &SMatrix::from_diagonal(&Q),
+        &SMatrix::from_diagonal(&R),
+        &SMatrix::zeros(),
+    )
+    .unwrap();
+
     type Mpc = TinyMpc<Float, Cache, 12, 4, HX, HU>;
-    let mut mpc = Mpc::new(A, B, Q, R, RHO).unwrap();
+    let mut mpc = Mpc::new(A, B, cache);
 
     // Configure settings
     mpc.config.max_iter = 20;

@@ -43,10 +43,23 @@ const R: SVector<f32, NU> = vector![1., 1., 1.];
 const RHO: f32 = 4.0;
 
 fn mpc_benchmark(c: &mut Criterion) {
-    type Cache = ArrayCache<f32, NX, NU, 1>;
-    type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
+    const NUM_CACHES: usize = 5;
+    type Cache = ArrayCache<f32, NX, NU, NUM_CACHES>;
+    let cache = Cache::new(
+        RHO,
+        10.0,
+        1.8,
+        HX,
+        &A,
+        &B,
+        &SMatrix::from_diagonal(&Q),
+        &SMatrix::from_diagonal(&R),
+        &SMatrix::zeros(),
+    )
+    .unwrap();
 
-    let mut mpc = Mpc::new(A, B, Q, R, RHO).unwrap();
+    type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
+    let mut mpc = Mpc::new(A, B, cache);
     mpc.config.max_iter = 6;
     mpc.config.do_check = 3;
 

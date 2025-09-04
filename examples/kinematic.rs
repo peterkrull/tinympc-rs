@@ -9,8 +9,8 @@ use tinympc_rs::{
 
 type Float = f64;
 
-const HX: usize = 20;
-const HU: usize = HX - 5;
+const HX: usize = 50;
+const HU: usize = HX - 10;
 
 const NX: usize = 3;
 const NU: usize = 1;
@@ -18,7 +18,7 @@ const NU: usize = 1;
 const DT: Float = 0.2;
 const DD: Float = 0.5 * DT * DT;
 
-const LP: Float = 0.5;
+const LP: Float = 0.90;
 
 const A: SMatrix<Float, NX, NX> = matrix![
     1., DT, DD;
@@ -26,26 +26,35 @@ const A: SMatrix<Float, NX, NX> = matrix![
     0., 0., LP;
 ];
 
-const B: SMatrix<Float, NX, NU> = vector![0., 0., (1. - LP)];
+const B: SMatrix<Float, NX, NU> = matrix![0.; 0.; (1. - LP)];
 
-const Q: SVector<Float, NX> = vector! {5., 0., 0.};
-const R: SVector<Float, NU> = vector! {1.,};
-const RHO: Float = 2.0;
+const Q: SMatrix<Float, NX, NX> = matrix![
+    9., 0., 0.;
+    0., 1., 0.;
+    0., 0., 1.;
+];
+
+const R: SMatrix<Float, NU, NU> = matrix![3.];
+
+const RHO: Float = 16.0;
 
 fn main() -> Result<(), Error> {
     let rec = rerun::RecordingStreamBuilder::new("tinympc-constraints")
         .spawn()
         .unwrap();
 
-    const NUM_CACHES: usize = 5;
+    const NUM_CACHES: usize = 7;
     type Cache = ArrayCache<Float, NX, NU, NUM_CACHES>;
     type Mpc = TinyMpc<Float, Cache, NX, NU, HX, HU>;
 
-    let mut mpc = Mpc::new(A, B, Q, R, RHO)?;
-    mpc.config.max_iter = 400;
+    let cache = Cache::new(RHO, 10.0, 1.6, 1000, &A, &B, &Q, &R, &SMatrix::zeros()).unwrap();
+
+    let mut mpc = Mpc::new(A, B, cache);
+    mpc.config.max_iter = 3;
     mpc.config.do_check = 1;
-    mpc.config.prim_tol = 0.05;
-    mpc.config.dual_tol = 0.02;
+    mpc.config.prim_tol = 1e-3;
+    mpc.config.dual_tol = 1e-3;
+    mpc.config.relaxation = 1.5;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 
@@ -54,14 +63,14 @@ fn main() -> Result<(), Error> {
 
     // Velocity limiter
     let x_projector_box = Box {
-        upper: vector![None, Some(0.3), None],
-        lower: vector![None, Some(-0.3), None],
+        upper: vector![None, Some(0.25), None],
+        lower: vector![None, Some(-0.25), None],
     };
 
     // Actuation limiter
     let u_projector_box = Box {
-        upper: vector![Some(0.15)],
-        lower: vector![Some(-0.15)],
+        upper: vector![Some(0.1)],
+        lower: vector![Some(-0.1)],
     };
 
     let mut x_con = [x_projector_box.constraint()];
@@ -72,7 +81,7 @@ fn main() -> Result<(), Error> {
         for i in 0..HX {
             let mut x_ref_col = SVector::zeros();
 
-            if ((i + k) / 100) % 2 == 0 {
+            if ((i + k) / 110) % 2 == 0 {
                 x_ref_col[0] = 1.;
             } else {
                 x_ref_col[0] = -1.;

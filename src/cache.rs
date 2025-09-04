@@ -1,17 +1,17 @@
-use nalgebra::{RealField, SMatrix, SVector, Scalar, convert};
+use nalgebra::{RealField, SMatrix, Scalar, convert};
 
-use crate::Error;
+/// Errors that can occur during cache setup
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Error {
+    /// The value of rho must be strictly positive `(rho > 0)`
+    RhoNotPositive,
+    /// The matrix `R_aug + B^T * P * B` is not invertible
+    RpBPBNotInvertible,
+    /// The resulting matrices contained non-finite elements (Inf or NaN)
+    NonFiniteValues,
+}
 
 pub trait Cache<T, const NX: usize, const NU: usize>: Sized {
-    fn new(
-        rho: T,
-        iters: usize,
-        A: &SMatrix<T, NX, NX>,
-        B: &SMatrix<T, NX, NU>,
-        Q: &SVector<T, NX>,
-        R: &SVector<T, NU>,
-    ) -> Result<Self, Error>;
-
     /// Updates which cache is active by evaluating the primal and dual residuals.
     ///
     /// Returns: A scalar (old_rho/new_rho) to be applied to constraint duals in case the cache changed
@@ -43,51 +43,40 @@ pub struct SingleCache<T, const NX: usize, const NU: usize> {
     pub(crate) AmBKt: SMatrix<T, NX, NX>,
 }
 
-impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> Cache<T, NX, NU>
-    for SingleCache<T, NX, NU>
-{
-    fn new(
+impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> SingleCache<T, NX, NU> {
+    pub fn new(
         rho: T,
         iters: usize,
         A: &SMatrix<T, NX, NX>,
         B: &SMatrix<T, NX, NU>,
-        Q: &SVector<T, NX>,
-        R: &SVector<T, NU>,
+        Q: &SMatrix<T, NX, NX>,
+        R: &SMatrix<T, NU, NU>,
+        S: &SMatrix<T, NX, NU>,
     ) -> Result<Self, Error> {
         if !rho.is_positive() {
-            return Err(Error::RhoNotPositiveDefinite);
+            return Err(Error::RhoNotPositive);
         }
 
-        if !Q.iter().all(|q| q >= &T::zero()) {
-            return Err(Error::QNotPositiveSemidefinite);
-        }
+        let Q_rho = SMatrix::from_diagonal_element(rho);
+        let R_rho = SMatrix::from_diagonal_element(rho);
 
-        if !R.iter().all(|r| r > &T::zero()) {
-            return Err(Error::RNotPositiveDefinite);
-        }
-
-        let Q_aug = Q.add_scalar(rho);
-        let R_aug = R.add_scalar(rho);
-
-        let Q_diag = SMatrix::from_diagonal(&Q_aug);
-        let R_diag = SMatrix::from_diagonal(&R_aug);
+        let Q_diag = Q + Q_rho;
+        let R_diag = R + R_rho;
 
         let mut Klqr = SMatrix::zeros();
         let mut Plqr = Q_diag.clone_owned();
 
-        const INVERR: Error = Error::RpBPBNotInvertible;
-
         for _ in 0..iters {
             Klqr = (R_diag + B.transpose() * Plqr * B)
                 .try_inverse()
-                .ok_or(INVERR)?
-                * (B.transpose() * Plqr * A);
+                .ok_or(Error::RpBPBNotInvertible)?
+                * (S.transpose() + B.transpose() * Plqr * A);
             Plqr = A.transpose() * Plqr * A - A.transpose() * Plqr * B * Klqr + Q_diag;
         }
 
         let RpBPBi = (R_diag + B.transpose() * Plqr * B)
             .try_inverse()
-            .ok_or(INVERR)?;
+            .ok_or(Error::RpBPBNotInvertible)?;
         let AmBKt = (A - B * Klqr).transpose();
 
         // If RpBPBi and AmBKt are finite, so are all the other values
@@ -105,7 +94,11 @@ impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> Cache<T, NX
             })
             .ok_or(Error::NonFiniteValues)
     }
+}
 
+impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> Cache<T, NX, NU>
+    for SingleCache<T, NX, NU>
+{
     fn update_active(&mut self, _prim_residual: T, _dual_residual: T) -> Option<T> {
         None
     }
@@ -123,27 +116,27 @@ pub struct ArrayCache<T, const NX: usize, const NU: usize, const NUM: usize> {
     caches: [SingleCache<T, NX, NU>; NUM],
 }
 
-impl<T, const NX: usize, const NU: usize, const NUM: usize> Cache<T, NX, NU>
-    for ArrayCache<T, NX, NU, NUM>
+impl<T, const NX: usize, const NU: usize, const NUM: usize> ArrayCache<T, NX, NU, NUM>
 where
     T: Scalar + RealField + Copy,
 {
-    fn new(
+    pub fn new(
         central_rho: T,
+        threshold: T,
+        factor: T,
         iters: usize,
         A: &SMatrix<T, NX, NX>,
         B: &SMatrix<T, NX, NU>,
-        Q: &SVector<T, NX>,
-        R: &SVector<T, NU>,
+        Q: &SMatrix<T, NX, NX>,
+        R: &SMatrix<T, NU, NU>,
+        S: &SMatrix<T, NX, NU>,
     ) -> Result<Self, Error> {
-        let threshold = convert(10.0);
         let active_index = NUM / 2;
-
         let caches = crate::util::try_array_from_fn(|index| {
             let diff = index as i32 - active_index as i32;
-            let expo = convert::<f64, T>(1.6).powf(convert(diff as f64));
-            let rho = central_rho * expo;
-            SingleCache::new(rho, iters, A, B, Q, R) // returns error
+            let mult = factor.powf(convert(diff as f64));
+            let rho = central_rho * mult;
+            SingleCache::new(rho, iters, A, B, Q, R, S)
         })?;
 
         Ok(Self {
@@ -152,7 +145,13 @@ where
             caches,
         })
     }
+}
 
+impl<T, const NX: usize, const NU: usize, const NUM: usize> Cache<T, NX, NU>
+    for ArrayCache<T, NX, NU, NUM>
+where
+    T: Scalar + RealField + Copy,
+{
     #[inline(always)]
     fn update_active(&mut self, prim_residual: T, dual_residual: T) -> Option<T> {
         let mut cache = &self.caches[self.active_index];

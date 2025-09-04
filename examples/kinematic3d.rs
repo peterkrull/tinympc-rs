@@ -66,9 +66,21 @@ fn main() -> Result<(), Error> {
 
     const NUM_CACHES: usize = 5;
     type Cache = ArrayCache<f32, NX, NU, NUM_CACHES>;
-    type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
+    let cache = Cache::new(
+        RHO,
+        10.0,
+        1.8,
+        HX,
+        &A,
+        &B,
+        &SMatrix::from_diagonal(&Q),
+        &SMatrix::from_diagonal(&R),
+        &SMatrix::zeros(),
+    )
+    .unwrap();
 
-    let mut mpc = Mpc::new(A, B, Q, R, RHO)?.with_sys(sys);
+    type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
+    let mut mpc = Mpc::new(A, B, cache).with_sys(sys);
     mpc.config.max_iter = 5;
     mpc.config.do_check = 2;
 
