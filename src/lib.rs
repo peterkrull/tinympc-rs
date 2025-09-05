@@ -440,7 +440,7 @@ where
                 ex_fut.gemv(T::one(), &s.B, &u_col, T::one());
                 ex_fut += s.w.column(i);
             }
-
+    
             // Roll out rest of trajectory keeping u constant
             for i in HU..HX - 1 {
                 let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
@@ -476,11 +476,15 @@ where
             s.r.scale_mut(alpha);
 
             for con in x_con.as_mut() {
-                s.q += con.slac.scale(T::one() - alpha);
+                for (mut prim, slac) in s.q.column_iter_mut().zip(con.slac.column_iter()) {
+                    prim.axpy(T::one() - alpha, &slac, T::one());
+                }
             }
 
             for con in u_con.as_mut() {
-                s.r += con.slac.scale(T::one() - alpha);
+                for (mut prim, slac) in s.r.column_iter_mut().zip(con.slac.column_iter()) {
+                    prim.axpy(T::one() - alpha, &slac, T::one());
+                }
             }
 
             // Buffers now contain: x' = alpha * x + (1 - alpha) * z
