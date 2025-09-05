@@ -176,11 +176,10 @@ where
     #[must_use]
     #[inline(always)]
     pub fn new(A: SMatrix<T, NX, NX>, B: SMatrix<T, NX, NU>, cache: C) -> Self {
-
         // Compile-time guard against invalid horizon lengths
         const {
-            assert!(HX > HU, "The prediction horizon `HX` must be larger than the control horizon `HU`");
-            assert!(HU > 0, "The control horizon `HU` must be non-zero");
+            assert!(HX > HU, "`HX` must be larger than `HU`");
+            assert!(HU > 0, "`HU` must be non-zero");
         }
 
         Self {
@@ -440,7 +439,7 @@ where
                 ex_fut.gemv(T::one(), &s.B, &u_col, T::one());
                 ex_fut += s.w.column(i);
             }
-    
+
             // Roll out rest of trajectory keeping u constant
             for i in HU..HX - 1 {
                 let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
