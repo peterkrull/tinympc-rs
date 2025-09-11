@@ -163,6 +163,69 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for S
     }
 }
 
+/// An anti-spherical constraint that is constant throughout the horizon
+#[derive(Debug, Copy, Clone)]
+pub struct AntiSphere<T, const N: usize> {
+    pub center: SVector<Option<T>, N>,
+    pub radius: T,
+}
+
+impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for AntiSphere<T, N> {
+    #[inline(always)]
+    fn project(&self, points: &mut SMatrix<T, N, H>) {
+        // If radius is zero, the feasible region is everything.
+        if self.radius.is_zero() {
+            return;
+        }
+
+        for h in 0..H {
+            let mut point = points.column_mut(h);
+
+            // Compute squared distance only for dimensions with defined centers
+            let mut squared_dist = T::zero();
+            let mut has_constraint = false;
+
+            for n in 0..N {
+                if let Some(center) = self.center[n] {
+                    has_constraint = true;
+                    let diff = point[n] - center;
+                    squared_dist += diff * diff;
+                }
+            }
+
+            // If no dimensions are constrained or point is outside/on radius, it's valid
+            if !has_constraint || squared_dist >= self.radius * self.radius {
+                continue;
+            }
+
+            let dist = squared_dist.sqrt();
+
+            // The projection direction is undefined.
+            if dist.is_zero() {
+                for n in 0..N {
+                    if let Some(center) = self.center[n] {
+                        point[n] = center + self.radius;
+                        // Break after moving along the first available axis
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            // Calculate scaling factor for projection
+            let scale = self.radius / dist;
+
+            // Apply scaling to push the point to the surface
+            for n in 0..N {
+                if let Some(center) = self.center[n] {
+                    let diff = point[n] - center;
+                    point[n] = center + diff * scale;
+                }
+            }
+        }
+    }
+}
+
 /// A half-space constraint that is constant throughout the horizon
 #[derive(Debug, Copy, Clone)]
 pub struct Affine<T, const N: usize> {
