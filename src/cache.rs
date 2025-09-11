@@ -40,7 +40,10 @@ pub struct SingleCache<T, const NX: usize, const NU: usize> {
     pub(crate) AmBKt: SMatrix<T, NX, NX>,
 }
 
-impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> SingleCache<T, NX, NU> {
+impl<T, const NX: usize, const NU: usize> SingleCache<T, NX, NU>
+where
+    T: Scalar + RealField + Copy,
+{
     pub fn new(
         rho: T,
         iters: usize,
@@ -53,6 +56,9 @@ impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> SingleCache
         if !rho.is_positive() {
             return Err(Error::RhoNotPositive);
         }
+
+        let Q = Q.symmetric_part();
+        let R = R.symmetric_part();
 
         // ADMM-augmented cost matrices for LQR problem
         let Q_aug = Q + SMatrix::from_diagonal_element(rho);
@@ -91,8 +97,9 @@ impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> SingleCache
     }
 }
 
-impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> Cache<T, NX, NU>
-    for SingleCache<T, NX, NU>
+impl<T, const NX: usize, const NU: usize> Cache<T, NX, NU> for SingleCache<T, NX, NU>
+where
+    T: Scalar + RealField + Copy,
 {
     fn update_active(&mut self, _prim_residual: T, _dual_residual: T) -> Option<T> {
         None
