@@ -176,11 +176,8 @@ where
     pub fn new(A: SMatrix<T, NX, NX>, B: SMatrix<T, NX, NU>, cache: C) -> Self {
         // Compile-time guard against invalid horizon lengths
         const {
-            assert!(
-                HX > HU,
-                "The prediction horizon `HX` must be larger than the control horizon `HU`"
-            );
-            assert!(HU > 0, "The control horizon `HU` must be non-zero");
+            assert!(HX > HU, "`HX` must be larger than `HU`");
+            assert!(HU > 0, "`HU` must be non-zero");
         }
 
         Self {
@@ -502,11 +499,15 @@ where
             s.r.scale_mut(alpha);
 
             for con in x_con.as_mut() {
-                s.q += con.slac.scale(T::one() - alpha);
+                for (mut prim, slac) in s.q.column_iter_mut().zip(con.slac.column_iter()) {
+                    prim.axpy(T::one() - alpha, &slac, T::one());
+                }
             }
 
             for con in u_con.as_mut() {
-                s.r += con.slac.scale(T::one() - alpha);
+                for (mut prim, slac) in s.r.column_iter_mut().zip(con.slac.column_iter()) {
+                    prim.axpy(T::one() - alpha, &slac, T::one());
+                }
             }
 
             // Buffers now contain: x' = alpha * x + (1 - alpha) * z
