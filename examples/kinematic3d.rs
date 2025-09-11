@@ -64,12 +64,23 @@ fn main() -> Result<(), Error> {
         .spawn()
         .unwrap();
 
-    const NUM_CACHES: usize = 5;
+    simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Info)
+        .without_timestamps()
+        .init()
+        .ok();
+
+    let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
+    let _puffin_server = puffin_http::Server::new(&server_addr).unwrap();
+    eprintln!("Run this to view profiling data:  puffin_viewer {server_addr}");
+    profiling::puffin::set_scopes_on(true);
+
+    const NUM_CACHES: usize = 9;
     type Cache = ArrayCache<f32, NX, NU, NUM_CACHES>;
     let cache = Cache::new(
         RHO,
         10.0,
-        1.8,
+        2.0,
         HX,
         &A,
         &B,
@@ -81,8 +92,8 @@ fn main() -> Result<(), Error> {
 
     type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
     let mut mpc = Mpc::new(A, B, cache).with_sys(sys);
-    mpc.config.max_iter = 5;
-    mpc.config.do_check = 2;
+    mpc.config.max_iter = 10;
+    mpc.config.do_check = 3;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 
@@ -167,12 +178,15 @@ fn main() -> Result<(), Error> {
 
         let time = std::time::Instant::now();
 
-        let solution = mpc
-            .initial_condition(x_now)
-            .x_reference(xref.as_view())
-            .x_constraints(x_con.as_mut())
-            .u_constraints(u_con.as_mut())
-            .solve();
+        let solution = {
+            profiling::scope!("solver loop: ", format!("iteration {k}"));
+            mpc.initial_condition(x_now)
+                .x_reference(&xref)
+                .x_constraints(&mut x_con)
+                .u_constraints(&mut u_con)
+                .solve()
+        };
+        profiling::finish_frame!();
 
         total_iters += solution.iterations;
 
@@ -265,7 +279,7 @@ fn main() -> Result<(), Error> {
         let strips = rerun::LineStrips2D::new([x_x, x_y, x_z]);
         rec.log("x_vel_strips", &strips).unwrap();
 
-        x_projector_bundle.project(x_mat.as_view_mut());
+        x_projector_bundle.project(&mut x_mat);
 
         let x_iter = x_mat.column_iter().enumerate();
         let x_x = rerun::LineStrip2D::from_iter(

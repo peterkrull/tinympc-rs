@@ -70,10 +70,10 @@ fn main() {
         // Run solvers
         let solution = mpc.solve(
             x,
-            Some(xref.as_view()),
+            Some(&xref),
             None,
-            Some(x_constraints.as_mut()),
-            Some(u_constraints.as_mut()),
+            Some(&mut x_constraints),
+            Some(&mut u_constraints),
         );
 
         let mut u_now = solution.u_now();
@@ -87,7 +87,7 @@ fn main() {
         );
 
         // Iterate simulation
-        ucon_box1.project(u_now.as_view_mut());
+        ucon_box1.project(&mut u_now);
         x = A * x + B * u_now;
 
         total_iters += mpc.get_num_iters();

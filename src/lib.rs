@@ -1,9 +1,7 @@
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![allow(non_snake_case)]
 
-use nalgebra::{
-    RealField, SMatrix, SMatrixView, SVector, SVectorView, SVectorViewMut, Scalar, convert,
-};
+use nalgebra::{RealField, SMatrix, SVector, SVectorView, SVectorViewMut, Scalar, convert};
 
 pub mod cache;
 pub mod constraint;
@@ -63,7 +61,6 @@ pub struct State<T, const NX: usize, const NU: usize, const HX: usize, const HU:
     // Linear state space model
     A: SMatrix<T, NX, NX>,
     B: SMatrix<T, NX, NU>,
-    Bt: SMatrix<T, NU, NX>,
 
     // For sparse system dynamics
     sys: Option<LtiFn<T, NX, NU>>,
@@ -73,7 +70,8 @@ pub struct State<T, const NX: usize, const NU: usize, const HX: usize, const HU:
     eu: SMatrix<T, NU, HU>,
 
     // State tracking dynamics mismatch
-    w: SMatrix<T, NX, HX>,
+    cx: SMatrix<T, NX, HX>,
+    cp: SMatrix<T, NX, HX>,
 
     // Linear cost matrices
     q: SMatrix<T, NX, HX>,
@@ -105,8 +103,8 @@ pub struct Problem<
 {
     mpc: &'a mut TinyMpc<T, C, NX, NU, HX, HU>,
     x_now: SVector<T, NX>,
-    x_ref: Option<SMatrixView<'a, T, NX, HX>>,
-    u_ref: Option<SMatrixView<'a, T, NU, HU>>,
+    x_ref: Option<&'a SMatrix<T, NX, HX>>,
+    u_ref: Option<&'a SMatrix<T, NU, HU>>,
     x_con: Option<&'a mut [Constraint<T, XProj, NX, HX>]>,
     u_con: Option<&'a mut [Constraint<T, UProj, NU, HU>]>,
 }
@@ -120,14 +118,14 @@ where
     UProj: Project<T, NU, HU>,
 {
     /// Set the reference for state variables
-    pub fn x_reference(mut self, x_ref: impl Into<SMatrixView<'a, T, NX, HX>>) -> Self {
-        self.x_ref = Some(x_ref.into());
+    pub fn x_reference(mut self, x_ref: &'a SMatrix<T, NX, HX>) -> Self {
+        self.x_ref = Some(x_ref);
         self
     }
 
     /// Set the reference for input variables
-    pub fn u_reference(mut self, u_ref: impl Into<SMatrixView<'a, T, NU, HU>>) -> Self {
-        self.u_ref = Some(u_ref.into());
+    pub fn u_reference(mut self, u_ref: &'a SMatrix<T, NU, HU>) -> Self {
+        self.u_ref = Some(u_ref);
         self
     }
 
@@ -176,10 +174,12 @@ where
     #[must_use]
     #[inline(always)]
     pub fn new(A: SMatrix<T, NX, NX>, B: SMatrix<T, NX, NU>, cache: C) -> Self {
-
         // Compile-time guard against invalid horizon lengths
         const {
-            assert!(HX > HU, "The prediction horizon `HX` must be larger than the control horizon `HU`");
+            assert!(
+                HX > HU,
+                "The prediction horizon `HX` must be larger than the control horizon `HU`"
+            );
             assert!(HU > 0, "The control horizon `HU` must be non-zero");
         }
 
@@ -195,9 +195,9 @@ where
             state: State {
                 A,
                 B,
-                Bt: B.transpose(),
                 sys: None,
-                w: SMatrix::zeros(),
+                cx: SMatrix::zeros(),
+                cp: SMatrix::zeros(),
                 q: SMatrix::zeros(),
                 r: SMatrix::zeros(),
                 p: SMatrix::zeros(),
@@ -233,8 +233,8 @@ where
     pub fn solve<'a>(
         &'a mut self,
         x_now: SVector<T, NX>,
-        x_ref: Option<SMatrixView<'a, T, NX, HX>>,
-        u_ref: Option<SMatrixView<'a, T, NU, HU>>,
+        x_ref: Option<&'a SMatrix<T, NX, HX>>,
+        u_ref: Option<&'a SMatrix<T, NU, HU>>,
         x_con: Option<&mut [Constraint<T, impl Project<T, NX, HX>, NX, HX>]>,
         u_con: Option<&mut [Constraint<T, impl Project<T, NU, HU>, NU, HU>]>,
     ) -> Solution<'a, T, NX, NU, HX, HU> {
@@ -248,8 +248,13 @@ where
         self.set_initial_conditions(x_now, x_ref, u_ref);
         self.warm_start_constraints(x_con, u_con);
 
+        let mut prim_residual = T::zero();
+        let mut dual_residual = T::zero();
+
         self.state.iter = 0;
         while self.state.iter < self.config.max_iter {
+            profiling::scope!("solve loop", format!("iter: {}", self.state.iter));
+
             self.update_cost(x_con, u_con);
 
             self.backward_pass();
@@ -258,7 +263,7 @@ where
 
             self.update_constraints(x_ref, u_ref, x_con, u_con);
 
-            if self.check_termination(x_con, u_con) {
+            if self.check_termination(&mut prim_residual, &mut dual_residual, x_con, u_con) {
                 reason = TerminationReason::Converged;
                 self.state.iter += 1;
                 break;
@@ -270,12 +275,12 @@ where
         Solution {
             x_ref,
             u_ref,
-            x: self.state.ex.as_view(),
-            u: self.state.eu.as_view(),
+            x: &self.state.ex,
+            u: &self.state.eu,
             reason,
             iterations: self.state.iter,
-            prim_residual: T::zero(),
-            dual_residual: T::zero(),
+            prim_residual,
+            dual_residual: dual_residual * self.cache.get_active().rho,
         }
     }
 
@@ -285,38 +290,49 @@ where
     }
 
     #[inline(always)]
+    #[profiling::function]
     fn set_initial_conditions(
         &mut self,
         x_now: SVector<T, NX>,
-        x_ref: Option<SMatrixView<T, NX, HX>>,
-        u_ref: Option<SMatrixView<T, NU, HU>>,
+        x_ref: Option<&SMatrix<T, NX, HX>>,
+        u_ref: Option<&SMatrix<T, NU, HU>>,
     ) {
         if let Some(x_ref) = x_ref {
-            self.state.ex.set_column(0, &(x_now - x_ref.column(0)));
+            profiling::scope!("affine state reference term");
+            x_now.sub_to(&x_ref.column(0), &mut self.state.ex.column_mut(0));
+            self.state.A.mul_to(&x_ref, &mut self.state.cx);
             for i in 0..HX - 1 {
-                let mut w_col = self.state.w.column_mut(i);
-                self.state.A.mul_to(&x_ref.column(i), &mut w_col);
-                w_col -= &x_ref.column(i + 1);
+                let mut cx_col = self.state.cx.column_mut(i);
+                cx_col.axpy(-T::one(), &x_ref.column(i + 1), T::one());
             }
         } else {
             self.state.ex.set_column(0, &x_now);
         }
 
         if let Some(u_ref) = u_ref {
-            for i in 0..HU {
-                let mut w_col = self.state.w.column_mut(i);
-                w_col.gemv(-T::one(), &self.state.B, &u_ref.column(i), T::one());
-            }
-
-            for i in HU..HX - 1 {
-                let mut w_col = self.state.w.column_mut(i);
-                w_col.gemv(-T::one(), &self.state.B, &u_ref.column(HU - 1), T::one());
+            profiling::scope!("affine input reference term");
+            for i in 0..HX - 1 {
+                let mut cx_col = self.state.cx.column_mut(i);
+                let u_ref_col = u_ref.column(i.min(HU - 1));
+                cx_col.gemv(-T::one(), &self.state.B, &u_ref_col, T::one());
             }
         }
+
+        self.update_tracking_mismatch_plqr();
+    }
+
+    #[inline(always)]
+    fn update_tracking_mismatch_plqr(&mut self) {
+        // Note: using `sygemv` to exploit the symmetry of Plqr is actually
+        // slower than just doing a regular matrix-vector multiplication,
+        // since sygemv adds additional indexing overhead.
+        let cache = self.cache.get_active();
+        cache.Plqr.mul_to(&self.state.cx, &mut self.state.cp);
     }
 
     /// Shift the dual variables by one time step for more accurate hot starting
     #[inline(always)]
+    #[profiling::function]
     fn warm_start_constraints(
         &mut self,
         x_con: &mut [Constraint<T, impl Project<T, NX, HX>, NX, HX>],
@@ -335,6 +351,7 @@ where
 
     /// Update linear control cost terms based on constraint violations
     #[inline(always)]
+    #[profiling::function]
     fn update_cost(
         &mut self,
         x_con: &mut [Constraint<T, impl Project<T, NX, HX>, NX, HX>],
@@ -346,6 +363,7 @@ where
         // Add cost contribution for state constraint violations
         let mut x_con_iter = x_con.iter_mut();
         if let Some(x_con_first) = x_con_iter.next() {
+            profiling::scope!("update state cost");
             x_con_first.set_cost(&mut s.q);
             for x_con_next in x_con_iter {
                 x_con_next.add_cost(&mut s.q);
@@ -358,6 +376,7 @@ where
         // Add cost contribution for input constraint violations
         let mut u_con_iter = u_con.iter_mut();
         if let Some(u_con_first) = u_con_iter.next() {
+            profiling::scope!("update input cost");
             u_con_first.set_cost(&mut s.r);
             for u_con_next in u_con_iter {
                 u_con_next.add_cost(&mut s.r);
@@ -373,6 +392,7 @@ where
 
     /// Backward pass to update Ricatti variables
     #[inline(always)]
+    #[profiling::function]
     fn backward_pass(&mut self) {
         let s = &mut self.state;
         let c = self.cache.get_active();
@@ -381,27 +401,27 @@ where
             let (mut p_now, mut p_fut) = util::column_pair_mut(&mut s.p, i, i + 1);
             let mut r_col = s.r.column_mut(i.min(HU - 1));
 
-            // TODO: Cache the Plqr * w[i] term as long as RHO stays constant
-            // Reused calculation: [[[i+1]]] <= (p[i+1] + Plqr * w[i])
-            p_fut.gemv(T::one(), &c.Plqr, &s.w.column(i), T::one());
+            // Reused calculation: [[[i+1]]] <- (p[i+1] + Plqr * w[i])
+            p_fut.axpy(T::one(), &s.cp.column(i), T::one());
 
-            // Calc: p[i] = AmBKt * [[[i+1]]] + q[i] - Klqr' * r[:,u_index]
-            c.AmBKt.mul_to(&p_fut, &mut p_now);
-            p_now.gemv(T::one(), &c.nKlqrt, &r_col, T::one());
-            p_now += s.q.column(i);
+            // Calc: p[i] = AmBKt * [[[i+1]]] - Klqr' * r[:,u_index] + q[i]
+            p_now.gemv(T::one(), &c.AmBKt, &p_fut, T::zero());
+            p_now.gemv_tr(T::one(), &c.nKlqr, &r_col, T::one());
+            p_now.axpy(T::one(), &s.q.column(i), T::one());
 
             if i < HU {
                 let mut d_col = s.d.column_mut(i);
 
                 // Calc: d[i] = RpBPBi * (B' * [[[i+1]]] + r[i])
-                r_col.gemv(T::one(), &s.Bt, &p_fut, T::one());
-                c.RpBPBi.mul_to(&r_col, &mut d_col);
+                r_col.gemv_tr(T::one(), &s.B, &p_fut, T::one());
+                d_col.gemv(T::one(), &c.RpBPBi, &r_col, T::zero());
             }
         }
     }
 
     /// Use LQR feedback policy to roll out trajectory
     #[inline(always)]
+    #[profiling::function]
     fn forward_pass(&mut self) {
         let s = &mut self.state;
         let c = self.cache.get_active();
@@ -412,11 +432,11 @@ where
                 let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
                 let mut u_col = s.eu.column_mut(i);
 
-                c.nKlqr.mul_to(&ex_now, &mut u_col);
-                u_col -= s.d.column(i);
+                u_col.gemv(T::one(), &c.nKlqr, &ex_now, T::zero());
+                u_col.axpy(-T::one(), &s.d.column(i), T::one());
 
                 system(ex_fut.as_view_mut(), ex_now.as_view(), u_col.as_view());
-                ex_fut += s.w.column(i)
+                ex_fut.axpy(T::one(), &s.cx.column(i), T::one());
             }
 
             // Roll out rest of trajectory keeping u constant
@@ -425,7 +445,7 @@ where
                 let u_col = s.eu.column(HU - 1);
 
                 system(ex_fut.as_view_mut(), ex_now.as_view(), u_col.as_view());
-                ex_fut += s.w.column(i)
+                ex_fut.axpy(T::one(), &s.cx.column(i), T::one());
             }
         } else {
             // Roll out trajectory up to the control horizon (HU)
@@ -433,12 +453,14 @@ where
                 let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
                 let mut u_col = s.eu.column_mut(i);
 
-                c.nKlqr.mul_to(&ex_now, &mut u_col);
-                u_col -= s.d.column(i);
+                // Calc: u[i] = -Klqr * ex[i] + d[i]
+                u_col.gemv(T::one(), &c.nKlqr, &ex_now, T::zero());
+                u_col.axpy(-T::one(), &s.d.column(i), T::one());
 
-                s.A.mul_to(&ex_now, &mut ex_fut);
+                // Calc x[i+1] = A * x[i] + B * u[i] + w[i]
+                ex_fut.gemv(T::one(), &s.A, &ex_now, T::zero());
                 ex_fut.gemv(T::one(), &s.B, &u_col, T::one());
-                ex_fut += s.w.column(i);
+                ex_fut.axpy(T::one(), &s.cx.column(i), T::one());
             }
 
             // Roll out rest of trajectory keeping u constant
@@ -446,19 +468,21 @@ where
                 let (ex_now, mut ex_fut) = util::column_pair_mut(&mut s.ex, i, i + 1);
                 let u_col = s.eu.column(HU - 1);
 
-                s.A.mul_to(&ex_now, &mut ex_fut);
+                // Calc x[i+1] = A * x[i] + B * u[i] + w[i]
+                ex_fut.gemv(T::one(), &s.A, &ex_now, T::zero());
                 ex_fut.gemv(T::one(), &s.B, &u_col, T::one());
-                ex_fut += s.w.column(i);
+                ex_fut.axpy(T::one(), &s.cx.column(i), T::one());
             }
         }
     }
 
     /// Project slack variables into their feasible domain and update dual variables
     #[inline(always)]
+    #[profiling::function]
     fn update_constraints(
         &mut self,
-        x_ref: Option<SMatrixView<T, NX, HX>>,
-        u_ref: Option<SMatrixView<T, NU, HU>>,
+        x_ref: Option<&SMatrix<T, NX, HX>>,
+        u_ref: Option<&SMatrix<T, NU, HU>>,
         x_con: &mut [Constraint<T, impl Project<T, NX, HX>, NX, HX>],
         u_con: &mut [Constraint<T, impl Project<T, NU, HU>, NU, HU>],
     ) {
@@ -466,6 +490,8 @@ where
         let s = &mut self.state;
 
         let (x_points, u_points) = if self.config.relaxation != T::one() {
+            profiling::scope!("apply relaxation to state and input");
+
             // Use Riccati matrices to store relaxed x and u matrices.
             s.q.copy_from(&s.ex);
             s.r.copy_from(&s.eu);
@@ -484,10 +510,10 @@ where
             }
 
             // Buffers now contain: x' = alpha * x + (1 - alpha) * z
-            (s.q.as_view(), s.r.as_view())
+            (&s.q, &s.r)
         } else {
             // Just use original predictions
-            (s.ex.as_view(), s.eu.as_view())
+            (&s.ex, &s.eu)
         };
 
         // Use cost matrices as scratch buffers
@@ -495,18 +521,21 @@ where
         let x_scratch = &mut s.p;
 
         for con in x_con {
-            con.constrain(compute_residuals, x_points, x_ref, x_scratch.as_view_mut());
+            con.constrain(compute_residuals, x_points, x_ref, x_scratch);
         }
 
         for con in u_con {
-            con.constrain(compute_residuals, u_points, u_ref, u_scratch.as_view_mut());
+            con.constrain(compute_residuals, u_points, u_ref, u_scratch);
         }
     }
 
     /// Check for termination condition by evaluating residuals
     #[inline(always)]
+    #[profiling::function]
     fn check_termination(
         &mut self,
+        max_prim_residual: &mut T,
+        max_dual_residual: &mut T,
         x_con: &mut [Constraint<T, impl Project<T, NX, HX>, NX, HX>],
         u_con: &mut [Constraint<T, impl Project<T, NU, HU>, NU, HU>],
     ) -> bool {
@@ -517,30 +546,32 @@ where
             return false;
         }
 
-        let mut max_prim_residual = T::zero();
-        let mut max_dual_residual = T::zero();
+        *max_prim_residual = T::zero();
+        *max_dual_residual = T::zero();
 
         for con in x_con.iter() {
-            max_prim_residual = max_prim_residual.max(con.max_prim_residual);
-            max_dual_residual = max_dual_residual.max(con.max_dual_residual);
+            *max_prim_residual = (*max_prim_residual).max(con.max_prim_residual);
+            *max_dual_residual = (*max_dual_residual).max(con.max_dual_residual);
         }
 
         for con in u_con.iter() {
-            max_prim_residual = max_prim_residual.max(con.max_prim_residual);
-            max_dual_residual = max_dual_residual.max(con.max_dual_residual);
+            *max_prim_residual = (*max_prim_residual).max(con.max_prim_residual);
+            *max_dual_residual = (*max_dual_residual).max(con.max_dual_residual);
         }
 
         let terminate =
-            max_prim_residual < cfg.prim_tol && max_dual_residual * c.rho < cfg.dual_tol;
-
-        let is_last = self.state.iter == cfg.max_iter - 1;
+            *max_prim_residual < cfg.prim_tol && *max_dual_residual * c.rho < cfg.dual_tol;
 
         // Try to adapt rho
-        if (!terminate || is_last)
+        if !terminate
             && let Some(scalar) = self
                 .cache
-                .update_active(max_prim_residual, max_dual_residual)
+                .update_active(*max_prim_residual, *max_dual_residual)
         {
+            profiling::scope!("cache updated, rescale all dual variables");
+
+            self.update_tracking_mismatch_plqr();
+
             for con in x_con.iter_mut() {
                 con.rescale_dual(scalar)
             }
@@ -580,10 +611,10 @@ where
 }
 
 pub struct Solution<'a, T, const NX: usize, const NU: usize, const HX: usize, const HU: usize> {
-    x_ref: Option<SMatrixView<'a, T, NX, HX>>,
-    u_ref: Option<SMatrixView<'a, T, NU, HU>>,
-    x: SMatrixView<'a, T, NX, HX>,
-    u: SMatrixView<'a, T, NU, HU>,
+    x_ref: Option<&'a SMatrix<T, NX, HX>>,
+    u_ref: Option<&'a SMatrix<T, NU, HU>>,
+    x: &'a SMatrix<T, NX, HX>,
+    u: &'a SMatrix<T, NU, HU>,
     pub reason: TerminationReason,
     pub iterations: usize,
     pub prim_residual: T,
@@ -596,7 +627,7 @@ impl<T: RealField + Copy, const NX: usize, const NU: usize, const HX: usize, con
     /// Get the predictiction of states for this solution
     pub fn x_prediction(&self) -> SMatrix<T, NX, HX> {
         if let Some(x_ref) = self.x_ref.as_ref() {
-            self.x + x_ref
+            self.x + *x_ref
         } else {
             self.x.clone_owned()
         }
@@ -605,7 +636,7 @@ impl<T: RealField + Copy, const NX: usize, const NU: usize, const HX: usize, con
     /// Get the predictiction of inputs for this solution
     pub fn u_prediction(&self) -> SMatrix<T, NU, HU> {
         if let Some(u_ref) = self.u_ref.as_ref() {
-            self.u + u_ref
+            self.u + *u_ref
         } else {
             self.u.clone_owned()
         }

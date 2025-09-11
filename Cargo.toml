@@ -7,14 +7,22 @@ authors = ["Peter Krull"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
+default = ["profiling", "std"]
+profiling = ["profiling/profile-with-puffin", "std"]
+std = []
 
 [dependencies]
 nalgebra = { version = "0.34.0", default-features = false, features = ["libm"] }
+profiling = { version = "1.0.17" }
 
 [dev-dependencies]
 nalgebra = { version = "0.34.0", features = ["macros"] }
 criterion = "0.7.0"
 rerun = "0.24.0"
+
+puffin_http = "0.16.1"
+simple_logger = "5.0.0"
+log = "0.4.28"
 
 [[bench]]
 name = "kinematic_bench"

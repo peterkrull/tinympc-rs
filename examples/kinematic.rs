@@ -9,13 +9,13 @@ use tinympc_rs::{
 
 type Float = f64;
 
-const HX: usize = 50;
+const HX: usize = 150;
 const HU: usize = HX - 10;
 
 const NX: usize = 3;
 const NU: usize = 1;
 
-const DT: Float = 0.2;
+const DT: Float = 0.05;
 const DD: Float = 0.5 * DT * DT;
 
 const LP: Float = 0.90;
@@ -29,32 +29,45 @@ const A: SMatrix<Float, NX, NX> = matrix![
 const B: SMatrix<Float, NX, NU> = matrix![0.; 0.; (1. - LP)];
 
 const Q: SMatrix<Float, NX, NX> = matrix![
-    9., 0., 0.;
+    10., 0., 0.;
     0., 1., 0.;
     0., 0., 1.;
 ];
 
-const R: SMatrix<Float, NU, NU> = matrix![3.];
+const R: SMatrix<Float, NU, NU> = matrix![1.0];
 
-const RHO: Float = 16.0;
+const RHO: Float = 2.0;
 
 fn main() -> Result<(), Error> {
+    simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Info)
+        .without_timestamps()
+        .init()
+        .ok();
+
+    let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
+    let _puffin_server = puffin_http::Server::new(&server_addr).unwrap();
+    eprintln!("Run this to view profiling data:  puffin_viewer {server_addr}");
+    profiling::puffin::set_scopes_on(true);
+
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
     let rec = rerun::RecordingStreamBuilder::new("tinympc-constraints")
         .spawn()
         .unwrap();
 
-    const NUM_CACHES: usize = 7;
+    const NUM_CACHES: usize = 9;
     type Cache = ArrayCache<Float, NX, NU, NUM_CACHES>;
     type Mpc = TinyMpc<Float, Cache, NX, NU, HX, HU>;
 
-    let cache = Cache::new(RHO, 10.0, 1.6, 1000, &A, &B, &Q, &R, &SMatrix::zeros()).unwrap();
+    let cache = Cache::new(RHO, 10.0, 2.0, 1000, &A, &B, &Q, &R, &SMatrix::zeros()).unwrap();
 
     let mut mpc = Mpc::new(A, B, cache);
-    mpc.config.max_iter = 3;
-    mpc.config.do_check = 1;
+    mpc.config.max_iter = 5;
+    mpc.config.do_check = 2;
     mpc.config.prim_tol = 1e-3;
     mpc.config.dual_tol = 1e-3;
-    mpc.config.relaxation = 1.5;
+    mpc.config.relaxation = 1.8;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 
@@ -63,25 +76,43 @@ fn main() -> Result<(), Error> {
 
     // Velocity limiter
     let x_projector_box = Box {
-        upper: vector![None, Some(0.25), None],
-        lower: vector![None, Some(-0.25), None],
+        upper: vector![None, Some(0.8), None],
+        lower: vector![None, Some(-0.8), None],
     };
 
     // Actuation limiter
     let u_projector_box = Box {
-        upper: vector![Some(0.1)],
-        lower: vector![Some(-0.1)],
+        upper: vector![Some(0.7)],
+        lower: vector![Some(-0.7)],
     };
 
     let mut x_con = [x_projector_box.constraint()];
     let mut u_con = [u_projector_box.constraint()];
 
+    rec.log_static(
+        "prim_res",
+        &rerun::SeriesLines::new()
+            .with_colors([[255, 100, 100]])
+            .with_names(["primal residual"])
+            .with_widths([1.0]),
+    )
+    .unwrap();
+
+    rec.log_static(
+        "dual_res",
+        &rerun::SeriesLines::new()
+            .with_colors([[80, 220, 80]])
+            .with_names(["dual residual"])
+            .with_widths([1.0]),
+    )
+    .unwrap();
+
     let mut total_iters = 0;
-    for k in 0..=300 {
+    for k in 0..=500 {
         for i in 0..HX {
             let mut x_ref_col = SVector::zeros();
 
-            if ((i + k) / 110) % 2 == 0 {
+            if ((i + k) / 170) % 2 == 0 {
                 x_ref_col[0] = 1.;
             } else {
                 x_ref_col[0] = -1.;
@@ -92,12 +123,14 @@ fn main() -> Result<(), Error> {
 
         let time = std::time::Instant::now();
 
+        profiling::scope!("solver loop: ", format!("iteration {k}"));
         let solution = mpc
             .initial_condition(x_now)
-            .u_constraints(u_con.as_mut())
-            .x_constraints(x_con.as_mut())
-            .x_reference(x_ref.as_view())
+            .u_constraints(&mut u_con)
+            .x_constraints(&mut x_con)
+            .x_reference(&x_ref)
             .solve();
+        profiling::finish_frame!();
 
         total_iters += solution.iterations;
 
@@ -110,13 +143,12 @@ fn main() -> Result<(), Error> {
             solution.reason,
         );
 
-        // Apply input to system
+        // Apply (constrained) input to system
         let mut u_now = solution.u_now();
-        u_projector_box.project(u_now.as_view_mut());
+        u_projector_box.project(&mut u_now);
         x_now = A * x_now + B * u_now;
 
         // ------ RERUN VISUALIZATION -------
-
         rec.set_time("timeline", Duration::from_millis((50 * k) as u64));
 
         let x_mat = solution.x_prediction();
@@ -155,6 +187,12 @@ fn main() -> Result<(), Error> {
 
         let strips = rerun::LineStrips2D::new([line_strip]);
         rec.log("u_strips", &strips).unwrap();
+
+        let res = rerun::Scalars::single(solution.prim_residual);
+        rec.log("prim_res", &res).unwrap();
+
+        let res = rerun::Scalars::single(solution.dual_residual);
+        rec.log("dual_res", &res).unwrap();
     }
 
     println!("Total iterations: {total_iters}");

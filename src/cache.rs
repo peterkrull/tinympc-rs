@@ -11,7 +11,7 @@ pub enum Error {
     NonFiniteValues,
 }
 
-pub trait Cache<T, const NX: usize, const NU: usize>: Sized {
+pub trait Cache<T, const NX: usize, const NU: usize> {
     /// Updates which cache is active by evaluating the primal and dual residuals.
     ///
     /// Returns: A scalar (old_rho/new_rho) to be applied to constraint duals in case the cache changed
@@ -29,9 +29,6 @@ pub struct SingleCache<T, const NX: usize, const NU: usize> {
 
     /// (Negated) Infinite-time horizon LQR gain
     pub(crate) nKlqr: SMatrix<T, NU, NX>,
-
-    /// Transposed Infinite-time horizon LQR gain
-    pub(crate) nKlqrt: SMatrix<T, NX, NU>,
 
     /// Infinite-time horizon LQR cost-to-go
     pub(crate) Plqr: SMatrix<T, NX, NX>,
@@ -57,27 +54,26 @@ impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> SingleCache
             return Err(Error::RhoNotPositive);
         }
 
-        let Q_rho = SMatrix::from_diagonal_element(rho);
-        let R_rho = SMatrix::from_diagonal_element(rho);
-
-        let Q_diag = Q + Q_rho;
-        let R_diag = R + R_rho;
+        // ADMM-augmented cost matrices for LQR problem
+        let Q_aug = Q + SMatrix::from_diagonal_element(rho);
+        let R_aug = R + SMatrix::from_diagonal_element(rho);
 
         let mut Klqr = SMatrix::zeros();
-        let mut Plqr = Q_diag.clone_owned();
+        let mut Plqr = Q_aug.clone_owned();
 
         for _ in 0..iters {
-            Klqr = (R_diag + B.transpose() * Plqr * B)
+            Klqr = (R_aug + B.transpose() * Plqr * B)
                 .try_inverse()
                 .ok_or(Error::RpBPBNotInvertible)?
                 * (S.transpose() + B.transpose() * Plqr * A);
-            Plqr = A.transpose() * Plqr * A - A.transpose() * Plqr * B * Klqr + Q_diag;
+            Plqr = A.transpose() * Plqr * A - A.transpose() * Plqr * B * Klqr + Q_aug;
         }
 
-        let RpBPBi = (R_diag + B.transpose() * Plqr * B)
+        let RpBPBi = (R_aug + B.transpose() * Plqr * B)
             .try_inverse()
             .ok_or(Error::RpBPBNotInvertible)?;
         let AmBKt = (A - B * Klqr).transpose();
+        let nKlqr = -Klqr;
 
         // If RpBPBi and AmBKt are finite, so are all the other values
         ([].iter())
@@ -86,8 +82,7 @@ impl<T: Scalar + RealField + Copy, const NX: usize, const NU: usize> SingleCache
             .all(|x| x.is_finite())
             .then_some(SingleCache {
                 rho,
-                nKlqr: -Klqr,
-                nKlqrt: -Klqr.transpose(),
+                nKlqr,
                 Plqr,
                 RpBPBi,
                 AmBKt,
@@ -157,6 +152,7 @@ where
         let mut cache = &self.caches[self.active_index];
         let prev_rho = cache.rho;
 
+        // TODO: It seems to work better without this?
         // Since we are using a scaled dual formulation
         let dual_residual = dual_residual * prev_rho;
 

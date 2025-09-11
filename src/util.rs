@@ -1,4 +1,4 @@
-use nalgebra::{Const, Matrix, SMatrixViewMut, SVectorViewMut, Scalar, ViewStorageMut};
+use nalgebra::{Const, Matrix, RealField, SMatrix, SVectorViewMut, Scalar, ViewStorageMut};
 
 /// Helper function to get a mutable view into two colums of a matrix.
 ///
@@ -7,7 +7,7 @@ use nalgebra::{Const, Matrix, SMatrixViewMut, SVectorViewMut, Scalar, ViewStorag
 ///  if indices are out of bounds or if they are the same
 #[inline(always)]
 pub(crate) fn column_pair_mut<'a, T: Scalar, const R: usize, const C: usize>(
-    matrix: impl Into<SMatrixViewMut<'a, T, R, C>>,
+    matrix: &'a mut SMatrix<T, R, C>,
     column0: usize,
     column1: usize,
 ) -> (SVectorViewMut<'a, T, R>, SVectorViewMut<'a, T, R>) {
@@ -15,7 +15,7 @@ pub(crate) fn column_pair_mut<'a, T: Scalar, const R: usize, const C: usize>(
     assert!(column0 < C, "column0 is out of bounds");
     assert!(column1 < C, "column1 is out of bounds");
 
-    let ptr = matrix.into().as_mut_ptr();
+    let ptr = matrix.as_mut_ptr();
 
     let shape = (Const::<R>, Const::<1>);
     let strides = (Const::<1>, Const::<R>);
@@ -31,12 +31,12 @@ pub(crate) fn column_pair_mut<'a, T: Scalar, const R: usize, const C: usize>(
 
 /// Shifts all columns such that `column[i] <- column[i + 1]` with the last two being identical.
 #[inline(always)]
-pub(crate) fn shift_columns_left<'a, T: Scalar, const R: usize, const C: usize>(
-    matrix: impl Into<SMatrixViewMut<'a, T, R, C>>,
+pub(crate) fn shift_columns_left<T: Scalar, const R: usize, const C: usize>(
+    matrix: &mut SMatrix<T, R, C>,
 ) {
     if C > 1 {
         let element_count = R * (C - 1);
-        let ptr = matrix.into().as_mut_ptr();
+        let ptr = matrix.as_mut_ptr();
 
         unsafe {
             core::ptr::copy(ptr.add(R), ptr, element_count);
@@ -77,4 +77,12 @@ pub(crate) fn try_array_from_fn<T: Sized, E, const N: usize>(
 
     // Safety: We've just initialized every element in the loop above.
     Ok(unsafe { array.map(|elem| elem.assume_init()) })
+}
+
+#[profiling::function]
+pub(crate) fn frobenius_norm<'a, T, const N: usize, const H: usize>(mat: &SMatrix<T, N, H>) -> T
+where
+    T: RealField + Copy,
+{
+    mat.iter().copied().fold(T::zero(), |a, b| a + b * b).sqrt()
 }

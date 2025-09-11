@@ -1,35 +1,35 @@
-use nalgebra::{RealField, SMatrixViewMut, SVector};
+use nalgebra::{RealField, SMatrix, SVector};
 
 use crate::constraint::{Constraint, DynConstraint};
 
 /// Can project a series of points into their feasible region.
 pub trait Project<T, const N: usize, const H: usize> {
     /// Applies the projection to a series of points, modifying them in place
-    fn project(&self, points: SMatrixViewMut<T, N, H>);
+    fn project(&self, points: &mut SMatrix<T, N, H>);
 }
 
 impl<T, const N: usize, const H: usize> Project<T, N, H> for &dyn Project<T, N, H> {
-    fn project(&self, points: SMatrixViewMut<T, N, H>) {
+    fn project(&self, points: &mut SMatrix<T, N, H>) {
         (**self).project(points);
     }
 }
 
 impl<P: Project<T, N, H>, T, const N: usize, const H: usize> Project<T, N, H> for &P {
-    fn project(&self, points: SMatrixViewMut<T, N, H>) {
+    fn project(&self, points: &mut SMatrix<T, N, H>) {
         (**self).project(points);
     }
 }
 
 impl<T, const N: usize, const H: usize> Project<T, N, H> for () {
-    fn project(&self, mut _points: SMatrixViewMut<T, N, H>) {}
+    fn project(&self, mut _points: &mut SMatrix<T, N, H>) {}
 }
 
 impl<P: Project<T, N, H>, T, const N: usize, const H: usize, const NUM: usize> Project<T, N, H>
     for [P; NUM]
 {
-    fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+    fn project(&self, points: &mut SMatrix<T, N, H>) {
         for projector in self {
-            projector.project(points.as_view_mut());
+            projector.project(points);
         }
     }
 }
@@ -39,9 +39,9 @@ macro_rules! derive_tuple_project {
         impl<$($project: Project<T, N, H>),+, T, const N: usize, const H: usize> Project<T, N, H>
             for ( $($project,)+ )
         {
-            fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+            fn project(&self, points: &mut SMatrix<T, N, H>) {
                 $(
-                    self.$number.project(points.as_view_mut());
+                    self.$number.project(points);
                 )+
             }
         }
@@ -90,7 +90,8 @@ pub struct Box<T, const N: usize> {
 
 impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Box<T, N> {
     #[inline(always)]
-    fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+    fn project(&self, points: &mut SMatrix<T, N, H>) {
+        profiling::scope!("projector: Box");
         let lower = self.lower.map(|x| x.unwrap_or(T::min_value().unwrap()));
         let upper = self.upper.map(|x| x.unwrap_or(T::max_value().unwrap()));
 
@@ -112,7 +113,8 @@ pub struct Sphere<T, const N: usize> {
 
 impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Sphere<T, N> {
     #[inline(always)]
-    fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+    fn project(&self, points: &mut SMatrix<T, N, H>) {
+        profiling::scope!("projector: Sphere");
         // Special case, just snap the points to the center coordinate
         if self.radius.is_zero() {
             for h in 0..H {
@@ -170,7 +172,8 @@ pub struct Affine<T, const N: usize> {
 
 impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for Affine<T, N> {
     #[inline(always)]
-    fn project(&self, mut points: SMatrixViewMut<T, N, H>) {
+    fn project(&self, points: &mut SMatrix<T, N, H>) {
+        profiling::scope!("projector: Affine");
         if self.normal.norm_squared().is_zero() {
             return;
         }

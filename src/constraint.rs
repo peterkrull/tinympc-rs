@@ -1,4 +1,4 @@
-use nalgebra::{RealField, SMatrix, SMatrixView, SMatrixViewMut, convert};
+use nalgebra::{RealField, SMatrix, convert};
 
 use crate::project::Project;
 
@@ -45,12 +45,13 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
 
     /// Constrains the set of points, and if `compute_residuals == true`, computes the maximum primal and dual residuals
     #[inline(always)]
+    #[profiling::function]
     pub fn constrain(
         &mut self,
         compute_residuals: bool,
-        points: SMatrixView<T, N, H>,
-        reference: Option<SMatrixView<T, N, H>>,
-        scratch: SMatrixViewMut<T, N, H>,
+        points: &SMatrix<T, N, H>,
+        reference: Option<&SMatrix<T, N, H>>,
+        scratch: &mut SMatrix<T, N, H>,
     ) {
         match compute_residuals {
             true => self.constrain_calc_residuals(points, reference, scratch),
@@ -60,11 +61,12 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
 
     /// Constrains the set of points, and computes the maximum primal and dual residuals
     #[inline(always)]
+    #[profiling::function]
     fn constrain_calc_residuals(
         &mut self,
-        points: SMatrixView<T, N, H>,
-        reference: Option<SMatrixView<T, N, H>>,
-        mut scratch: SMatrixViewMut<T, N, H>,
+        points: &SMatrix<T, N, H>,
+        reference: Option<&SMatrix<T, N, H>>,
+        mut scratch: &mut SMatrix<T, N, H>,
     ) {
         // Initialize with old slac variables for computing dual residual
         scratch.copy_from(&self.slac);
@@ -72,67 +74,66 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
         // Offset the slack variables by the reference before projecting
         points.add_to(&self.dual, &mut self.slac);
         if let Some(reference) = reference {
-            self.slac += &reference;
-            self.projector.project(self.slac.as_view_mut());
-            self.slac -= &reference;
+            profiling::scope!("reference offset");
+            self.slac += reference;
+            self.projector.project(&mut self.slac);
+            self.slac -= reference;
         } else {
-            self.projector.project(self.slac.as_view_mut());
+            self.projector.project(&mut self.slac);
         }
 
         // Compute dual residual
-        scratch -= &self.slac;
-        scratch.apply(|t| *t = t.abs());
-        self.max_dual_residual = scratch.max();
+        *scratch -= self.slac;
+        self.max_dual_residual = crate::util::frobenius_norm(&scratch);
 
         // Compute primal residual
         points.sub_to(&self.slac, &mut scratch);
 
         // Update dual parameters
-        self.dual += &scratch;
+        self.dual += *scratch;
 
         // Compute primal residual
-        scratch.apply(|t| *t = t.abs());
-        self.max_prim_residual = scratch.max();
+        self.max_prim_residual = crate::util::frobenius_norm(&scratch);
     }
 
     /// Constrains the set of points
     #[inline(always)]
-    fn constrain_only(
-        &mut self,
-        points: SMatrixView<T, N, H>,
-        reference: Option<SMatrixView<T, N, H>>,
-    ) {
+    #[profiling::function]
+    fn constrain_only(&mut self, points: &SMatrix<T, N, H>, reference: Option<&SMatrix<T, N, H>>) {
         // Offset the slack variables by the reference before projecting
         points.add_to(&self.dual, &mut self.slac);
         if let Some(reference) = reference {
-            self.slac += &reference;
-            self.projector.project(self.slac.as_view_mut());
-            self.slac -= &reference;
+            profiling::scope!("reference offset");
+            self.slac += reference;
+            self.projector.project(&mut self.slac);
+            self.slac -= reference;
         } else {
-            self.projector.project(self.slac.as_view_mut());
+            self.projector.project(&mut self.slac);
         }
 
         // Update dual parameters
-        self.dual += &points;
-        self.dual -= &self.slac;
+        self.dual += points;
+        self.dual -= self.slac;
     }
 
     /// Add the cost associated with this constraints violation to a cost sum
     #[inline(always)]
-    pub(crate) fn add_cost<'a>(&self, cost: impl Into<SMatrixViewMut<'a, T, N, H>>) {
-        let mut cost = cost.into();
-        cost += &self.dual;
-        cost -= &self.slac;
+    #[profiling::function]
+    pub(crate) fn add_cost(&self, cost: &mut SMatrix<T, N, H>) {
+        *cost += self.dual;
+        *cost -= self.slac;
     }
 
     /// Add the cost associated with this constraints violation to a cost sum
     #[inline(always)]
-    pub(crate) fn set_cost<'a>(&mut self, cost: impl Into<SMatrixViewMut<'a, T, N, H>>) {
-        self.dual.sub_to(&self.slac, &mut cost.into());
+    #[profiling::function]
+    pub(crate) fn set_cost(&mut self, cost: &mut SMatrix<T, N, H>) {
+        self.dual.sub_to(&self.slac, cost);
     }
 
     /// Re-scale the dual variables for when the value of rho has changed
     #[inline(always)]
+    #[profiling::function]
     pub(crate) fn rescale_dual(&mut self, scalar: T) {
         self.dual.scale_mut(scalar);
     }

@@ -99,9 +99,9 @@ fn mpc_benchmark(c: &mut Criterion) {
         b.iter(|| {
             let _solution = mpc
                 .initial_condition(x_now)
-                .u_constraints(u_con.as_mut())
-                .x_constraints(x_con.as_mut())
-                .x_reference(xref.as_view())
+                .u_constraints(&mut u_con)
+                .x_constraints(&mut x_con)
+                .x_reference(&xref)
                 .solve();
         });
     });
