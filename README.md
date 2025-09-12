@@ -59,19 +59,19 @@ The power of MPC comes from its ability to handle constraints. Constraints in `t
 // or inputs back into the feasible domain.
 let x_projector = (
     Sphere {
-        center: //..,
-        radius: //..,
+        center: ..,
+        radius: ..,
     },
     Box {
-        upper: //..,
-        lower: //..,
+        upper: ..,
+        lower: ..,
     }
 );
 
 // Or we can just use a single projector
 let u_projector = Box {
-    upper: //..,
-    lower: //..,
+    upper: ..,
+    lower: ..,
 };
 
 // The constraint() method automatically creates and manages
