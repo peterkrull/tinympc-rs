@@ -9,15 +9,15 @@ Given some discrete time state space model $x_{k+1} = A x_k + B u_k$ with $N_x$ 
 use nalgebra as na;
 
 // Number of states and inputs
-const NX: usize = //..
-const NU: usize = //..
+const NX: usize = .. ;
+const NU: usize = .. ;
 
 // System dynamics
 const A: na::SMatrix<f32, NX, NX> = na::matrix![..];
 const B: na::SMatrix<f32, NX, NU> = na::vector![..];
 ```
 
-For LQR and MPC we typically have a cost matrix associated with the state and input deviating from their references. For simplicity these are defined using vectors representing the diagonal of such matrices. 
+For LQR and MPC we typically have a cost matrix associated with the state and input deviating from their references. For simplicity these are defined using vectors representing the diagonal of such matrices.
 
 
 ```rust
@@ -30,8 +30,8 @@ We define the prediction horizon length $H_x$ and control horizon length $H_u$ w
 
 ```rust
 // Set the prediction and control horizon length
-const HX: usize = //..
-const HU: usize = //..
+const HX: usize = .. ;
+const HU: usize = .. ;
 
 // The ADMM penalty parameter. Does not have to be const
 let rho = 2.0;
@@ -61,7 +61,7 @@ let x_projector = (
     Sphere {
         center: //..,
         radius: //..,
-    }, 
+    },
     Box {
         upper: //..,
         lower: //..,
