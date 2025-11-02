@@ -3,6 +3,9 @@ name = "tinympc-rs"
 version = "0.1.0"
 edition = "2024"
 authors = ["Peter Krull"]
+keywords = ["mpc", "lqr", "control", "controller", "optimal", "constrained", "ADMM"]
+repository = "https://github.com/peterkrull/tinympc-rs"
+license = "MIT or Apache 2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -12,11 +15,11 @@ profiling = ["profiling/profile-with-puffin", "std"]
 std = []
 
 [dependencies]
-nalgebra = { version = "0.34.0", default-features = false, features = ["libm"] }
+nalgebra = { version = "0.34", default-features = false, features = ["libm"] }
 profiling = { version = "1.0.17" }
 
 [dev-dependencies]
-nalgebra = { version = "0.34.0", features = ["macros"] }
+nalgebra = { version = "0.34", features = ["macros"] }
 criterion = "0.7.0"
 rerun = "0.24.0"
 
