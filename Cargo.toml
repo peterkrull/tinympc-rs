@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Peter Krull"]
 keywords = ["mpc", "lqr", "control", "controller", "optimal", "constrained", "ADMM", "embedded"]
 repository = "https://github.com/peterkrull/tinympc-rs"
-license = "MIT or Apache 2.0"
+license = "MIT"
 description = "Linear model predictive control for resources constrained devices"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
