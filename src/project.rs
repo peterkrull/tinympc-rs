@@ -61,26 +61,30 @@ derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P
 
 /// Extension trait for types implementing [`Project`] to convert it directly
 /// into a constraint with associated dual and slack variables.
-pub trait ProjectExt<T: RealField + Copy, const N: usize, const H: usize>:
-    Project<T, N, H> + Sized
-{
-    fn dynamic(&self) -> &dyn Project<T, N, H> {
+pub trait ProjectExt<T: RealField + Copy, const N: usize, const H: usize>: Sized {
+    fn dynamic(&self) -> &dyn Project<T, N, H>
+    where
+        Self: Project<T, N, H>,
+    {
         self
     }
 
-    fn constraint(&self) -> Constraint<T, &Self, N, H> {
+    fn constraint(&self) -> Constraint<T, &Self, N, H>
+    where
+        Self: Project<T, N, H>,
+    {
         Constraint::new(self)
     }
 
-    fn dyn_constraint(&self) -> DynConstraint<'_, T, N, H> {
+    fn dyn_constraint(&self) -> DynConstraint<'_, T, N, H>
+    where
+        Self: Project<T, N, H>,
+    {
         Constraint::new(self.dynamic())
     }
 }
 
-impl<S: Project<T, N, H>, T: RealField + Copy, const N: usize, const H: usize> ProjectExt<T, N, H>
-    for S
-{
-}
+impl<S: Sized, T: RealField + Copy, const N: usize, const H: usize> ProjectExt<T, N, H> for S {}
 
 /// A box constraint that is constant throughout the horizon.
 pub struct Box<T, const N: usize> {
@@ -250,6 +254,111 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for A
                 // Project onto the boundary: move point towards the plane
                 let correction = normal.scale(dot - self.distance);
                 point -= correction;
+            }
+        }
+    }
+}
+
+/// A second-order cone constraint, constant throughout the horizon.
+#[derive(Debug, Clone)]
+pub struct SecondOrderCone<T: RealField + Copy, const D: usize> {
+    indices: [usize; D],
+    tip: SVector<T, D>,
+    axis: SVector<T, D>,
+    mu: T,
+}
+
+impl<T: RealField + Copy, const D: usize> SecondOrderCone<T, D> {
+    pub fn new<const N: usize>(indices: [usize; D]) -> SecondOrderCone<T, D> {
+        SecondOrderCone {
+            indices,
+            tip: SVector::zeros(),
+            axis: SVector::identity(),
+            mu: nalgebra::convert(1.0),
+        }
+    }
+
+    pub fn along(mut self, axis: SVector<T, D>) -> Self {
+        self.axis = axis.normalize();
+        self
+    }
+
+    pub fn origin(mut self, tip: SVector<T, D>) -> Self {
+        self.tip = tip;
+        self
+    }
+
+    pub fn mu(mut self, mu: T) -> Self {
+        self.mu = mu.max(T::default_epsilon());
+        self
+    }
+}
+
+impl<T: RealField + Copy, const N: usize, const H: usize, const D: usize> Project<T, N, H>
+    for SecondOrderCone<T, D> {
+    #[inline(always)]
+    fn project(&self, points: &mut SMatrix<T, N, H>) {
+        profiling::scope!("projector: Cone");
+
+        // Cones with mu < 0 are invalid (project to a line)
+        // Cones with mu = 0 are just a ray.
+        if self.mu <= T::zero() {
+            return;
+        }
+
+        for h in 0..H {
+            let mut point_h = points.column_mut(h);
+
+            // Extract the sub-vector from the full state
+            let mut sub_point: SVector<T, D> = SVector::zeros();
+            for i in 0..D {
+                if self.indices[i] >= N { continue; }
+                sub_point[i] = point_h[self.indices[i]];
+            }
+
+            // Translate by the tip to get vector v
+            let v = sub_point - self.tip;
+
+            // Decompose v into parallel and orthogonal components
+            let s_n = v.dot(&self.axis);
+            let s_v = v - self.axis.scale(s_n);
+
+            // The radial distance
+            let a = s_v.norm();
+
+            // Inside feasible region, do nothing
+            if a <= self.mu * s_n {
+                continue;
+            }
+
+            // Inside polar cone, project to tip
+            else if (s_n < T::zero() && (a * self.mu <= -s_n)) || a.is_zero() {
+                sub_point = self.tip;
+            }
+
+            // Outside both, project onto boundary
+            else {
+
+                let mu_sq = self.mu * self.mu;
+                let denom = T::one() + mu_sq;
+
+                // Correct Euclidean projection formula
+                let c = self.mu * a + s_n;
+                let a_proj = (self.mu * c) / denom;
+                let s_n_proj = c / denom;
+
+                // Reconstruct the projected vector
+                let s_v_proj = s_v.scale(a_proj / a);
+                let v_proj = s_v_proj + self.axis.scale(s_n_proj);
+
+                // Translate back from the tip
+                sub_point = v_proj + self.tip;
+            }
+
+            // 6. Write the projected sub-vector back into the full state
+            for i in 0..D {
+                if self.indices[i] >= N { continue; }
+                point_h[self.indices[i]] = sub_point[i];
             }
         }
     }
