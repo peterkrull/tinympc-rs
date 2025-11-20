@@ -76,6 +76,13 @@ pub trait ProjectExt<T: RealField + Copy, const N: usize, const H: usize>: Sized
         Constraint::new(self)
     }
 
+    fn constraint_owned(self) -> Constraint<T, Self, N, H>
+    where
+        Self: Project<T, N, H>,
+    {
+        Constraint::new(self)
+    }
+
     fn dyn_constraint(&self) -> DynConstraint<'_, T, N, H>
     where
         Self: Project<T, N, H>,
