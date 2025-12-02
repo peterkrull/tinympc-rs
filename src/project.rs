@@ -345,24 +345,11 @@ impl<T: RealField + Copy, const N: usize, const H: usize, const D: usize> Projec
 
             // Outside both, project onto boundary
             else {
-
-                let mu_sq = self.mu * self.mu;
-                let denom = T::one() + mu_sq;
-
-                // Correct Euclidean projection formula
-                let c = self.mu * a + s_n;
-                let a_proj = (self.mu * c) / denom;
-                let s_n_proj = c / denom;
-
-                // Reconstruct the projected vector
-                let s_v_proj = s_v.scale(a_proj / a);
-                let v_proj = s_v_proj + self.axis.scale(s_n_proj);
-
-                // Translate back from the tip
-                sub_point = v_proj + self.tip;
+                let alpha = (self.mu * a + s_n) / (T::one() + self.mu * self.mu);
+                sub_point = (self.axis + s_v * self.mu / a) * alpha + self.tip;
             }
 
-            // 6. Write the projected sub-vector back into the full state
+            // Write the projected sub-vector back into the full state
             for i in 0..D {
                 if self.indices[i] >= N { continue; }
                 point_h[self.indices[i]] = sub_point[i];
