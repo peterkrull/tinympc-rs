@@ -1,9 +1,9 @@
 use nalgebra::{RealField, SMatrix, convert};
 
-use crate::project::Project;
+use crate::{ProjectExt, project::Project};
 
 /// A [`Constraint`] consists of a projection function and a set of associated slack and dual variables.
-pub struct Constraint<T, P: Project<T, N, H>, const N: usize, const H: usize> {
+pub struct Constraint<T, P: ProjectExt<T, N>, const N: usize, const H: usize> {
     pub max_prim_residual: T,
     pub max_dual_residual: T,
     pub(crate) slac: SMatrix<T, N, H>,
@@ -13,9 +13,9 @@ pub struct Constraint<T, P: Project<T, N, H>, const N: usize, const H: usize> {
 
 /// Type alias for a [`Constraint`] that dynamically dispatches its projection function
 pub type DynConstraint<'a, F, const N: usize, const H: usize> =
-    Constraint<F, &'a dyn Project<F, N, H>, N, H>;
+    Constraint<F, &'a dyn ProjectExt<F, N>, N, H>;
 
-impl<T: RealField + Copy, const N: usize, const H: usize, P: Project<T, N, H>>
+impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectExt<T, N>>
     Constraint<T, P, N, H>
 {
     /// Construct a new [`Constraint`] from the provided [`Project`] type.
