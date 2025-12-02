@@ -266,32 +266,32 @@ impl<T: RealField + Copy, const N: usize, const H: usize> Project<T, N, H> for A
     }
 }
 
-/// A second-order cone constraint, constant throughout the horizon.
+/// A circular cone constraint, constant throughout the horizon.
 #[derive(Debug, Clone)]
-pub struct SecondOrderCone<T: RealField + Copy, const D: usize> {
+pub struct CircularCone<T: RealField + Copy, const D: usize> {
     indices: [usize; D],
-    tip: SVector<T, D>,
+    vertex: SVector<T, D>,
     axis: SVector<T, D>,
     mu: T,
 }
 
-impl<T: RealField + Copy, const D: usize> SecondOrderCone<T, D> {
-    pub fn new<const N: usize>(indices: [usize; D]) -> SecondOrderCone<T, D> {
-        SecondOrderCone {
+impl<T: RealField + Copy, const D: usize> CircularCone<T, D> {
+    pub fn new(indices: [usize; D]) -> CircularCone<T, D> {
+        CircularCone {
             indices,
-            tip: SVector::zeros(),
+            vertex: SVector::zeros(),
             axis: SVector::identity(),
             mu: nalgebra::convert(1.0),
         }
     }
 
-    pub fn along(mut self, axis: SVector<T, D>) -> Self {
-        self.axis = axis.normalize();
+    pub fn axis(mut self, axis: impl Into<SVector<T, D>>) -> Self {
+        self.axis = axis.into().normalize();
         self
     }
 
-    pub fn origin(mut self, tip: SVector<T, D>) -> Self {
-        self.tip = tip;
+    pub fn vertex(mut self, vertex: impl Into<SVector<T, D>>) -> Self {
+        self.vertex = vertex.into();
         self
     }
 
@@ -302,7 +302,7 @@ impl<T: RealField + Copy, const D: usize> SecondOrderCone<T, D> {
 }
 
 impl<T: RealField + Copy, const N: usize, const H: usize, const D: usize> Project<T, N, H>
-    for SecondOrderCone<T, D> {
+    for CircularCone<T, D> {
     #[inline(always)]
     fn project(&self, points: &mut SMatrix<T, N, H>) {
         profiling::scope!("projector: Cone");
@@ -324,7 +324,7 @@ impl<T: RealField + Copy, const N: usize, const H: usize, const D: usize> Projec
             }
 
             // Translate by the tip to get vector v
-            let v = sub_point - self.tip;
+            let v = sub_point - self.vertex;
 
             // Decompose v into parallel and orthogonal components
             let s_n = v.dot(&self.axis);
@@ -340,13 +340,13 @@ impl<T: RealField + Copy, const N: usize, const H: usize, const D: usize> Projec
 
             // Inside polar cone, project to tip
             else if (s_n < T::zero() && (a * self.mu <= -s_n)) || a.is_zero() {
-                sub_point = self.tip;
+                sub_point = self.vertex;
             }
 
             // Outside both, project onto boundary
             else {
                 let alpha = (self.mu * a + s_n) / (T::one() + self.mu * self.mu);
-                sub_point = (self.axis + s_v * self.mu / a) * alpha + self.tip;
+                sub_point = (self.axis + s_v * self.mu / a) * alpha + self.vertex;
             }
 
             // Write the projected sub-vector back into the full state
