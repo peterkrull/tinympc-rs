@@ -4,41 +4,56 @@ use nalgebra::{ComplexField, RealField, SMatrix, SVector, SVectorViewMut, conver
 
 use crate::constraint::{Constraint, DynConstraint};
 
-/// Can project a series of points into their feasible region.
-pub trait Project<T, const D: usize> {
-    /// Applies the projection to a series of points, modifying them in place
+/// Can project a multiple points into their feasible region.
+pub trait ProjectMulti<T: RealField + Copy, const D: usize, const H: usize> {
+    fn project_series(&self, points: &mut SMatrix<T, D, H>);
+}
+
+impl<P: ProjectMulti<T, D, H>, T: RealField + Copy, const D: usize, const H: usize>
+    ProjectMulti<T, D, H> for &P
+{
+    fn project_series(&self, points: &mut SMatrix<T, D, H>) {
+        (**self).project_series(points);
+    }
+}
+
+impl<T: RealField + Copy, const D: usize, const H: usize> ProjectMulti<T, D, H>
+    for &dyn ProjectMulti<T, D, H>
+{
+    fn project_series(&self, points: &mut SMatrix<T, D, H>) {
+        (**self).project_series(points);
+    }
+}
+
+impl<T: RealField + Copy, const D: usize, const H: usize> ProjectMulti<T, D, H> for () {
+    fn project_series(&self, _points: &mut SMatrix<T, D, H>) {}
+}
+
+/// Can project a single point into its feasible region.
+pub trait ProjectSingle<T, const D: usize> {
+    /// Apply the projection to a single point.
     fn project(&self, point: SVectorViewMut<T, D>);
 }
 
-impl<T, const D: usize> Project<T, D> for &dyn Project<T, D> {
+impl<T, const D: usize> ProjectSingle<T, D> for &dyn ProjectSingle<T, D> {
     fn project(&self, point: SVectorViewMut<T, D>) {
         (**self).project(point);
     }
 }
 
-impl<P: Project<T, D>, T, const D: usize> Project<T, D> for &P {
+impl<P: ProjectSingle<T, D>, T, const D: usize> ProjectSingle<T, D> for &P {
     fn project(&self, point: SVectorViewMut<T, D>) {
         (**self).project(point);
     }
 }
 
-impl<T, const D: usize> Project<T, D> for () {
-    fn project(&self, mut _points: SVectorViewMut<T, D>) {}
-}
-
-impl<P: Project<T, D>, T, const D: usize, const NUM: usize> Project<T, D>
-    for [P; NUM]
-{
-    fn project(&self, mut point: SVectorViewMut<T, D>) {
-        for projector in self {
-            projector.project(point.as_view_mut());
-        }
-    }
+impl<T, const D: usize> ProjectSingle<T, D> for () {
+    fn project(&self, mut _point: SVectorViewMut<T, D>) {}
 }
 
 macro_rules! derive_tuple_project {
     ($($project:ident: $number:tt),+) => {
-        impl<$($project: Project<T, D>),+, T, const D: usize> Project<T, D>
+        impl<$($project: ProjectSingle<T, D>),+, T, const D: usize> ProjectSingle<T, D>
             for ( $($project,)+ )
         {
             fn project(&self, mut point: SVectorViewMut<T, D>) {
@@ -61,48 +76,61 @@ derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7}
 derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8}
 derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8, P9: 9}
 
-/// Extension trait for types implementing [`Project`] to convert it directly
-/// into a constraint with associated dual and slack variables.
-pub trait ProjectExt<T: RealField + Copy, const D: usize>: Sized + Project<T, D> {
+/// Apply the projector `P` to be constant throughout the entire horizon.
+pub struct Constant<P> {
+    project: P,
+}
 
-    fn dynamic(&self) -> &dyn Project<T, D>
+impl<P> Constant<P> {
+    pub fn new<T, const D: usize>(project: P) -> Constant<P>
     where
-        Self: Project<T, D>,
+        P: ProjectSingle<T, D>,
+        T: RealField + Copy,
     {
-        self
-    }
-
-    fn constraint<const H: usize>(&self) -> Constraint<T, &Self, D, H>
-    where
-        Self: Project<T, D>,
-    {
-        Constraint::new(self)
-    }
-
-    fn constraint_owned<const H: usize>(self) -> Constraint<T, Self, D, H>
-    where
-        Self: Project<T, D>,
-    {
-        Constraint::new(self)
-    }
-
-    fn dyn_constraint<const H: usize>(&self) -> DynConstraint<'_, T, D, H>
-    where
-        Self: Project<T, D>,
-    {
-        Constraint::new(self.dynamic())
+        Constant { project }
     }
 }
 
-impl<S: Sized + Project<T, D>, T: RealField + Copy, const D: usize> ProjectExt<T, D> for S {}
+impl<P: ProjectSingle<T, D>, T: RealField + Copy, const D: usize, const H: usize>
+    ProjectMulti<T, D, H> for Constant<P>
+{
+    fn project_series(&self, points: &mut SMatrix<T, D, H>) {
+        for mut column in points.column_iter_mut() {
+            self.project.project(column.as_view_mut());
+        }
+    }
+}
 
-/// A box constraint
+pub trait ProjectExt<T: RealField + Copy, const D: usize, const H: usize>:
+    ProjectMulti<T, D, H> + Sized
+{
+    fn dynamic(&self) -> &dyn ProjectMulti<T, D, H> {
+        self
+    }
+
+    fn constraint(&self) -> Constraint<T, &Self, D, H> {
+        Constraint::new(self)
+    }
+
+    fn dyn_constraint(&self) -> DynConstraint<'_, T, D, H> {
+        Constraint::new(self)
+    }
+
+    fn constraint_owned(self) -> Constraint<T, Self, D, H> {
+        Constraint::new(self)
+    }
+}
+
+impl <P: ProjectMulti<T, D, H>, T: RealField + Copy, const D: usize, const H: usize> ProjectExt<T, D, H> for P {}
+
+/// A box projection
+#[derive(Debug, Copy, Clone)]
 pub struct Box<T, const N: usize> {
     pub lower: SVector<T, N>,
     pub upper: SVector<T, N>,
 }
 
-impl<T: RealField + Copy, const N: usize> Project<T, N> for Box<T, N> {
+impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for Box<T, N> {
     #[inline(always)]
     fn project(&self, mut point: SVectorViewMut<T, N>) {
         for n in 0..N {
@@ -111,22 +139,22 @@ impl<T: RealField + Copy, const N: usize> Project<T, N> for Box<T, N> {
     }
 }
 
-/// A spherical constraint
+/// A spherical projection
 #[derive(Debug, Copy, Clone)]
 pub struct Sphere<T, const D: usize> {
     pub center: SVector<T, D>,
     pub radius: T,
 }
 
-impl<T: RealField + Copy, const N: usize> Project<T, N> for Sphere<T, N> {
+impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for Sphere<T, N> {
     #[inline(always)]
     fn project(&self, mut point: SVectorViewMut<T, N>) {
-        if self.radius.is_zero() {
+        if self.radius <= T::zero() {
             point.copy_from(&self.center);
         } else {
             let diff = &point - &self.center;
             let dist = diff.norm();
-            
+
             if dist > self.radius {
                 let scale = self.radius / dist;
                 point.copy_from(&(self.center + diff * scale));
@@ -135,22 +163,22 @@ impl<T: RealField + Copy, const N: usize> Project<T, N> for Sphere<T, N> {
     }
 }
 
-/// An anti-spherical constraint
+/// An anti-spherical projection
 #[derive(Debug, Copy, Clone)]
 pub struct AntiSphere<T, const N: usize> {
     pub center: SVector<T, N>,
     pub radius: T,
 }
 
-impl<T: RealField + Copy, const N: usize> Project<T, N> for AntiSphere<T, N> {
+impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for AntiSphere<T, N> {
     #[inline(always)]
-     fn project(&self, mut point: SVectorViewMut<T, N>) {
+    fn project(&self, mut point: SVectorViewMut<T, N>) {
         if self.radius.is_zero() {
             return;
         } else {
             let diff = &point - &self.center;
             let dist = diff.norm();
-            
+
             if dist < self.radius {
                 let scale = self.radius / dist.max(convert(1e-9));
                 point.copy_from(&(self.center + diff * scale));
@@ -159,14 +187,14 @@ impl<T: RealField + Copy, const N: usize> Project<T, N> for AntiSphere<T, N> {
     }
 }
 
-/// A half-space constraint
+/// A half-space projection
 #[derive(Debug, Copy, Clone)]
 pub struct Affine<T, const N: usize> {
     pub normal: SVector<T, N>,
     pub distance: T,
 }
 
-impl<T: RealField + Copy, const N: usize> Project<T, N> for Affine<T, N> {
+impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for Affine<T, N> {
     #[inline(always)]
     fn project(&self, mut point: SVectorViewMut<T, N>) {
         let dot = point.dot(&self.normal);
@@ -177,7 +205,7 @@ impl<T: RealField + Copy, const N: usize> Project<T, N> for Affine<T, N> {
     }
 }
 
-/// A circular cone constraint
+/// A circular cone projection
 #[derive(Debug, Clone)]
 pub struct CircularCone<T: RealField + Copy, const D: usize> {
     vertex: SVector<T, D>,
@@ -186,6 +214,7 @@ pub struct CircularCone<T: RealField + Copy, const D: usize> {
 }
 
 impl<T: RealField + Copy, const D: usize> CircularCone<T, D> {
+    /// Create a new [`CircularCone`] projector with default values.
     pub fn new() -> CircularCone<T, D> {
         CircularCone {
             vertex: SVector::zeros(),
@@ -194,27 +223,28 @@ impl<T: RealField + Copy, const D: usize> CircularCone<T, D> {
         }
     }
 
+    /// Set the axis along the center of the cone.
     pub fn axis(mut self, axis: impl Into<SVector<T, D>>) -> Self {
         self.axis = axis.into().normalize();
         self
     }
 
+    /// Set the coordinate of the cones vertex / tip.
     pub fn vertex(mut self, vertex: impl Into<SVector<T, D>>) -> Self {
         self.vertex = vertex.into();
         self
     }
 
+    /// Set the `µ` value, or the "aperture" of the cone.
     pub fn mu(mut self, mu: T) -> Self {
-        self.mu = mu.max(T::default_epsilon());
+        self.mu = mu.max(T::zero());
         self
     }
 }
 
-impl<T: RealField + Copy, const D: usize> Project<T, D>
-    for CircularCone<T, D> {
+impl<T: RealField + Copy, const D: usize> ProjectSingle<T, D> for CircularCone<T, D> {
     #[inline(always)]
     fn project(&self, mut point: SVectorViewMut<T, D>) {
-
         // Translate by the tip to get vector v
         let v = &point - &self.vertex;
 
@@ -229,12 +259,10 @@ impl<T: RealField + Copy, const D: usize> Project<T, D>
         if a <= self.mu * s_n {
             return;
         }
-
         // Inside polar cone, project to tip
         else if (a * self.mu <= -s_n) || a.is_zero() {
             point.copy_from(&self.vertex);
         }
-
         // Outside both, project onto boundary
         else {
             let alpha = (self.mu * a + s_n) / (T::one() + self.mu * self.mu);
@@ -243,18 +271,17 @@ impl<T: RealField + Copy, const D: usize> Project<T, D>
     }
 }
 
-
-/// A circular cone constraint, constant throughout the horizon.
+/// Expand the projection into a higher dimensional space.
 #[derive(Debug, Clone)]
-pub struct SubSpace<P, const D: usize, const N: usize> {
+pub struct Expand<P, const D: usize, const N: usize> {
     indices: [usize; D],
     projector: P,
-    _p: PhantomData<[(); N]>
+    _p: PhantomData<[(); N]>,
 }
 
-impl <P, const D: usize, const N: usize> SubSpace<P, D, N> {
+impl<P, const D: usize, const N: usize> Expand<P, D, N> {
     pub fn new(indices: [usize; D], projector: P) -> Self {
-        assert!(indices.iter().all(|e|e < &N));
+        assert!(indices.iter().all(|e| e < &N));
         Self {
             indices,
             projector,
@@ -263,10 +290,11 @@ impl <P, const D: usize, const N: usize> SubSpace<P, D, N> {
     }
 }
 
-impl<P: Project<T, D>, T: ComplexField + Copy, const D: usize, const N: usize> Project<T, N>
-    for SubSpace<P, D, N> {
-        fn project(&self, mut point: SVectorViewMut<T, N>) {
-        assert!(self.indices.iter().all(|e|e < &N));
+impl<P: ProjectSingle<T, D>, T: ComplexField + Copy, const D: usize, const N: usize>
+    ProjectSingle<T, N> for Expand<P, D, N>
+{
+    fn project(&self, mut point: SVectorViewMut<T, N>) {
+        assert!(self.indices.iter().all(|e| e < &N));
 
         let mut sub_point: SVector<T, D> = SVector::zeros();
         for i in 0..D {
@@ -277,69 +305,6 @@ impl<P: Project<T, D>, T: ComplexField + Copy, const D: usize, const N: usize> P
 
         for i in 0..D {
             point[self.indices[i]] = sub_point[i];
-        }
-    }
-}
-
-/// A circular cone constraint, constant throughout the horizon.
-#[derive(Debug, Clone)]
-pub struct Cone<T: RealField + Copy, const D: usize> {
-    vertex: SVector<T, D>,
-    axis: SVector<T, D>,
-    mu: T,
-}
-
-impl<T: RealField + Copy, const D: usize> Cone<T, D> {
-    pub fn new() -> Cone<T, D> {
-        Cone {
-            vertex: SVector::zeros(),
-            axis: SVector::identity(),
-            mu: nalgebra::convert(1.0),
-        }
-    }
-
-    pub fn axis(mut self, axis: impl Into<SVector<T, D>>) -> Self {
-        self.axis = axis.into().normalize();
-        self
-    }
-
-    pub fn vertex(mut self, vertex: impl Into<SVector<T, D>>) -> Self {
-        self.vertex = vertex.into();
-        self
-    }
-
-    pub fn mu(mut self, mu: T) -> Self {
-        self.mu = mu.max(T::default_epsilon());
-        self
-    }
-
-     fn project(&self, point: &mut SVector<T, D>) {
-        profiling::scope!("projector: Cone");
-
-        // Translate by the vertex to get vector v
-        let v = *point - self.vertex;
-
-        // Decompose v into parallel and orthogonal components
-        let s_n = v.dot(&self.axis);
-        let s_v = v - self.axis.scale(s_n);
-
-        // The radial distance
-        let a = s_v.norm();
-
-        // Inside feasible region, do nothing
-        if a <= self.mu * s_n {
-            return;
-        }
-
-        // Inside polar cone, project to tip
-        else if (a * self.mu <= -s_n) || a.is_zero() {
-            *point = self.vertex;
-        }
-
-        // Outside both, project onto boundary
-        else {
-            let alpha = (self.mu * a + s_n) / (T::one() + self.mu * self.mu);
-            *point = (self.axis + s_v * self.mu / a) * alpha + self.vertex;
         }
     }
 }

@@ -98,8 +98,8 @@ pub struct Problem<
 > where
     T: Scalar + RealField + Copy,
     C: Cache<T, NX, NU>,
-    XProj: ProjectExt<T, NX>,
-    UProj: ProjectExt<T, NU>,
+    XProj: ProjectMulti<T, NX, HX>,
+    UProj: ProjectMulti<T, NU, HU>,
 {
     mpc: &'a mut TinyMpc<T, C, NX, NU, HX, HU>,
     x_now: SVector<T, NX>,
@@ -114,8 +114,8 @@ impl<'a, T, C, XProj, UProj, const NX: usize, const NU: usize, const HX: usize, 
 where
     T: Scalar + RealField + Copy,
     C: Cache<T, NX, NU>,
-    XProj: ProjectExt<T, NX>,
-    UProj: ProjectExt<T, NU>,
+    XProj: ProjectMulti<T, NX, HX>,
+    UProj: ProjectMulti<T, NU, HU>,
 {
     /// Set the reference for state variables
     pub fn x_reference(mut self, x_ref: &'a SMatrix<T, NX, HX>) -> Self {
@@ -130,7 +130,7 @@ where
     }
 
     /// Set constraints on the state variables
-    pub fn x_constraints<Proj: ProjectExt<T, NX>>(
+    pub fn x_constraints<Proj: ProjectMulti<T, NX, HX>>(
         self,
         x_con: &'a mut [Constraint<T, Proj, NX, HX>],
     ) -> Problem<'a, T, C, NX, NU, HX, HU, Proj, UProj> {
@@ -145,7 +145,7 @@ where
     }
 
     /// Set constraints on the input variables
-    pub fn u_constraints<Proj: Project<T, NU>>(
+    pub fn u_constraints<Proj: ProjectMulti<T, NU, HU>>(
         self,
         u_con: &'a mut [Constraint<T, Proj, NU, HU>],
     ) -> Problem<'a, T, C, NX, NU, HX, HU, XProj, Proj> {
@@ -232,8 +232,8 @@ where
         x_now: SVector<T, NX>,
         x_ref: Option<&'a SMatrix<T, NX, HX>>,
         u_ref: Option<&'a SMatrix<T, NU, HU>>,
-        x_con: Option<&mut [Constraint<T, impl ProjectExt<T, NX>, NX, HX>]>,
-        u_con: Option<&mut [Constraint<T, impl ProjectExt<T, NU>, NU, HU>]>,
+        x_con: Option<&mut [Constraint<T, impl ProjectMulti<T, NX, HX>, NX, HX>]>,
+        u_con: Option<&mut [Constraint<T, impl ProjectMulti<T, NU, HU>, NU, HU>]>,
     ) -> Solution<'a, T, NX, NU, HX, HU> {
         let mut reason = TerminationReason::MaxIters;
 
@@ -332,8 +332,8 @@ where
     #[profiling::function]
     fn warm_start_constraints(
         &mut self,
-        x_con: &mut [Constraint<T, impl ProjectExt<T, NX>, NX, HX>],
-        u_con: &mut [Constraint<T, impl ProjectExt<T, NU>, NU, HU>],
+        x_con: &mut [Constraint<T, impl ProjectMulti<T, NX, HX>, NX, HX>],
+        u_con: &mut [Constraint<T, impl ProjectMulti<T, NU, HU>, NU, HU>],
     ) {
         for con in x_con {
             util::shift_columns_left(&mut con.dual);
@@ -351,8 +351,8 @@ where
     #[profiling::function]
     fn update_cost(
         &mut self,
-        x_con: &mut [Constraint<T, impl ProjectExt<T, NX>, NX, HX>],
-        u_con: &mut [Constraint<T, impl ProjectExt<T, NU>, NU, HU>],
+        x_con: &mut [Constraint<T, impl ProjectMulti<T, NX, HX>, NX, HX>],
+        u_con: &mut [Constraint<T, impl ProjectMulti<T, NU, HU>, NU, HU>],
     ) {
         let s = &mut self.state;
         let c = self.cache.get_active();
@@ -480,8 +480,8 @@ where
         &mut self,
         x_ref: Option<&SMatrix<T, NX, HX>>,
         u_ref: Option<&SMatrix<T, NU, HU>>,
-        x_con: &mut [Constraint<T, impl ProjectExt<T, NX>, NX, HX>],
-        u_con: &mut [Constraint<T, impl ProjectExt<T, NU>, NU, HU>],
+        x_con: &mut [Constraint<T, impl ProjectMulti<T, NX, HX>, NX, HX>],
+        u_con: &mut [Constraint<T, impl ProjectMulti<T, NU, HU>, NU, HU>],
     ) {
         let compute_residuals = self.should_compute_residuals();
         let s = &mut self.state;
@@ -537,8 +537,8 @@ where
         &mut self,
         max_prim_residual: &mut T,
         max_dual_residual: &mut T,
-        x_con: &mut [Constraint<T, impl ProjectExt<T, NX>, NX, HX>],
-        u_con: &mut [Constraint<T, impl ProjectExt<T, NU>, NU, HU>],
+        x_con: &mut [Constraint<T, impl ProjectMulti<T, NX, HX>, NX, HX>],
+        u_con: &mut [Constraint<T, impl ProjectMulti<T, NU, HU>, NU, HU>],
     ) -> bool {
         let c = self.cache.get_active();
         let cfg = &self.config;

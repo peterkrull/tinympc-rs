@@ -5,7 +5,7 @@ use rerun::Color;
 use tinympc_rs::{
     Error, TinyMpc,
     cache::ArrayCache,
-    project::{Affine, Box, Project, ProjectExt as _, Sphere},
+    project::{Affine, Box, Constant, Expand, ProjectExt, ProjectSingle, Sphere},
 };
 
 const HX: usize = 150;
@@ -100,11 +100,10 @@ fn main() -> Result<(), Error> {
     let mut x_now = SVector::zeros();
     let mut xref = SMatrix::<f32, NX, HX>::zeros();
 
-    #[rustfmt::skip]
-    let x_project_sphere = Sphere {
-        center: vector![None, None, None, Some(0.0), Some(0.0), Some(0.0), None, None, None],
+    let x_project_sphere = Expand::new([3, 4, 5], Sphere {
+        center: vector![0.0, 0.0, 0.0],
         radius: 5.0,
-    };
+    });
 
     let x_projector_affine = Affine {
         normal: vector![-1.0, -1.0, 0., 0., 0., 0., 0., 0., 0.],
@@ -119,19 +118,19 @@ fn main() -> Result<(), Error> {
     // let x_projector_bundle = [&x_projector_bundle; 10];
 
     let u_projector_sphere = Sphere {
-        center: vector![Some(0.0), Some(0.0), Some(0.0)],
+        center: vector![0.0, 0.0, 0.0],
         radius: 10.0,
     };
 
     let u_projector_box = Box {
-        upper: vector![Some(2.0), Some(2.0), Some(2.0)],
-        lower: vector![Some(-2.0), Some(-2.0), Some(-2.0)],
+        upper: vector![2.0, 2.0, 2.0],
+        lower: vector![-2.0, -2.0, -2.0],
     };
 
     let u_projector_bundle = (u_projector_sphere, u_projector_box);
 
-    let mut x_con = [x_projector_bundle.constraint()];
-    let mut u_con = [u_projector_bundle.constraint()];
+    let mut x_con = [Constant::new(x_projector_bundle.clone()).constraint_owned()];
+    let mut u_con = [Constant::new(u_projector_bundle.clone()).constraint_owned()];
 
     let mut true_pos = vec![vector![0.0, 0.0, 0.0]];
 
@@ -279,7 +278,9 @@ fn main() -> Result<(), Error> {
         let strips = rerun::LineStrips2D::new([x_x, x_y, x_z]);
         rec.log("x_vel_strips", &strips).unwrap();
 
-        x_projector_bundle.project(&mut x_mat);
+        for mut col in x_mat.column_iter_mut() {
+            x_projector_bundle.project(col.as_view_mut());
+        }
 
         let x_iter = x_mat.column_iter().enumerate();
         let x_x = rerun::LineStrip2D::from_iter(

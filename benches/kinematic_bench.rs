@@ -3,7 +3,7 @@ use nalgebra::{SMatrix, SVector, matrix, vector};
 use tinympc_rs::{
     TinyMpc,
     cache::ArrayCache,
-    project::{ProjectExt, Sphere},
+    project::{ProjectMulti, Sphere},
 };
 
 const HX: usize = 150;

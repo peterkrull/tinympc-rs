@@ -2,8 +2,7 @@ use nalgebra::{SMatrix, SVector, matrix, vector};
 use tinympc_rs::{
     TinyMpc,
     cache::ArrayCache,
-    constraint::DynConstraint,
-    project::{Box, Project},
+    project::{Box, Constant, ProjectExt, ProjectSingle},
 };
 
 /*
@@ -47,18 +46,20 @@ fn main() {
     let mut x = vector![0.0, 1.0, 0.0, 0.2, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0];
 
     let xcon_box1 = Box {
-        lower: SVector::from_element(Some(-5.0)),
-        upper: SVector::from_element(Some(5.0)),
+        lower: SVector::from_element(-5.0),
+        upper: SVector::from_element(5.0),
     };
 
-    let mut x_constraints = [DynConstraint::new(&xcon_box1)];
+    let xcon_constant = Constant::new(xcon_box1.clone());
+    let mut x_constraints = [xcon_constant.dyn_constraint()];
 
     let ucon_box1 = Box {
-        lower: SVector::from_element(Some(-0.4)),
-        upper: SVector::from_element(Some(0.4)),
+        lower: SVector::from_element(-0.4),
+        upper: SVector::from_element(0.4),
     };
 
-    let mut u_constraints = [DynConstraint::new(&ucon_box1)];
+    let ucon_constant = Constant::new(ucon_box1.clone());
+    let mut u_constraints = [ucon_constant.dyn_constraint()];
 
     for i in 0..HX {
         let reference = vector![0., 0., 2.0, 0., 0., 0., 0., 0., 0., 0., 0., 0.];
@@ -87,7 +88,7 @@ fn main() {
         );
 
         // Iterate simulation
-        ucon_box1.project(&mut u_now);
+        ucon_box1.project(u_now.as_view_mut());
         x = A * x + B * u_now;
 
         total_iters += mpc.get_num_iters();

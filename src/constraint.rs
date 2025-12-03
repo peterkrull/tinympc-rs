@@ -1,9 +1,10 @@
 use nalgebra::{RealField, SMatrix, convert};
 
-use crate::{ProjectExt, project::Project};
+use crate::ProjectMulti;
 
 /// A [`Constraint`] consists of a projection function and a set of associated slack and dual variables.
-pub struct Constraint<T, P: ProjectExt<T, N>, const N: usize, const H: usize> {
+pub struct Constraint<T: RealField + Copy, P: ProjectMulti<T, N, H>, const N: usize, const H: usize>
+{
     pub max_prim_residual: T,
     pub max_dual_residual: T,
     pub(crate) slac: SMatrix<T, N, H>,
@@ -13,9 +14,9 @@ pub struct Constraint<T, P: ProjectExt<T, N>, const N: usize, const H: usize> {
 
 /// Type alias for a [`Constraint`] that dynamically dispatches its projection function
 pub type DynConstraint<'a, F, const N: usize, const H: usize> =
-    Constraint<F, &'a dyn ProjectExt<F, N>, N, H>;
+    Constraint<F, &'a dyn ProjectMulti<F, N, H>, N, H>;
 
-impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectExt<T, N>>
+impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, H>>
     Constraint<T, P, N, H>
 {
     /// Construct a new [`Constraint`] from the provided [`Project`] type.
@@ -76,10 +77,10 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectExt<T, N>>
         if let Some(reference) = reference {
             profiling::scope!("reference offset");
             self.slac += reference;
-            self.projector.project(&mut self.slac);
+            self.projector.project_series(&mut self.slac);
             self.slac -= reference;
         } else {
-            self.projector.project(&mut self.slac);
+            self.projector.project_series(&mut self.slac);
         }
 
         // Compute dual residual
@@ -105,10 +106,10 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectExt<T, N>>
         if let Some(reference) = reference {
             profiling::scope!("reference offset");
             self.slac += reference;
-            self.projector.project(&mut self.slac);
+            self.projector.project_series(&mut self.slac);
             self.slac -= reference;
         } else {
-            self.projector.project(&mut self.slac);
+            self.projector.project_series(&mut self.slac);
         }
 
         // Update dual parameters

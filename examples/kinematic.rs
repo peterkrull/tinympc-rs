@@ -2,9 +2,7 @@ use std::time::Duration;
 
 use nalgebra::{SMatrix, SVector, matrix, vector};
 use tinympc_rs::{
-    Error, TinyMpc,
-    cache::ArrayCache,
-    project::{Box, Project, ProjectExt as _},
+    Constant, Error, Expand, TinyMpc, cache::ArrayCache, project::{Box, ProjectExt as _, ProjectSingle}
 };
 
 type Float = f64;
@@ -30,13 +28,13 @@ const B: SMatrix<Float, NX, NU> = matrix![0.; 0.; (1. - LP)];
 
 const Q: SMatrix<Float, NX, NX> = matrix![
     10., 0., 0.;
-    0., 1., 0.;
-    0., 0., 1.;
+    0., 0.1, 0.;
+    0., 0., 0.1;
 ];
 
-const R: SMatrix<Float, NU, NU> = matrix![1.0];
+const R: SMatrix<Float, NU, NU> = matrix![0.1];
 
-const RHO: Float = 2.0;
+const RHO: Float = 8.0;
 
 fn main() -> Result<(), Error> {
     simple_logger::SimpleLogger::new()
@@ -56,7 +54,7 @@ fn main() -> Result<(), Error> {
         .spawn()
         .unwrap();
 
-    const NUM_CACHES: usize = 9;
+    const NUM_CACHES: usize = 5;
     type Cache = ArrayCache<Float, NX, NU, NUM_CACHES>;
     type Mpc = TinyMpc<Float, Cache, NX, NU, HX, HU>;
 
@@ -64,10 +62,10 @@ fn main() -> Result<(), Error> {
 
     let mut mpc = Mpc::new(A, B, cache);
     mpc.config.max_iter = 5;
-    mpc.config.do_check = 2;
+    mpc.config.do_check = 1;
     mpc.config.prim_tol = 1e-3;
     mpc.config.dual_tol = 1e-3;
-    mpc.config.relaxation = 1.8;
+    mpc.config.relaxation = 1.6;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
 
@@ -75,19 +73,19 @@ fn main() -> Result<(), Error> {
     let mut x_ref = SMatrix::<Float, NX, HX>::zeros();
 
     // Velocity limiter
-    let x_projector_box = Box {
-        upper: vector![None, Some(0.8), None],
-        lower: vector![None, Some(-0.8), None],
-    };
+    let x_projector_box = Expand::new([1], Box {
+        upper: vector![0.8],
+        lower: vector![-0.8],
+    });
 
     // Actuation limiter
-    let u_projector_box = Box {
-        upper: vector![Some(0.7)],
-        lower: vector![Some(-0.7)],
-    };
+    let u_projector_box = Expand::new([0], Box {
+        upper: vector![0.5],
+        lower: vector![-0.5],
+    });
 
-    let mut x_con = [x_projector_box.constraint()];
-    let mut u_con = [u_projector_box.constraint()];
+    let mut x_con = [Constant::new(&x_projector_box).constraint_owned()];
+    let mut u_con = [Constant::new(&u_projector_box).constraint_owned()];
 
     rec.log_static(
         "prim_res",
@@ -145,7 +143,7 @@ fn main() -> Result<(), Error> {
 
         // Apply (constrained) input to system
         let mut u_now = solution.u_now();
-        u_projector_box.project(&mut u_now);
+        u_projector_box.project(u_now.as_view_mut());
         x_now = A * x_now + B * u_now;
 
         // ------ RERUN VISUALIZATION -------
