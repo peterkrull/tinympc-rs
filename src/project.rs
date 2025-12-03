@@ -190,15 +190,38 @@ impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for AntiSphere<T, 
 /// A half-space projection
 #[derive(Debug, Copy, Clone)]
 pub struct Affine<T, const N: usize> {
-    pub normal: SVector<T, N>,
-    pub distance: T,
+    normal: SVector<T, N>,
+    distance: T,
+}
+
+impl<T: RealField + Copy, const D: usize> Affine<T, D> {
+    /// Create a new [`Affine`] projector with default values.
+    pub fn new() -> Affine<T, D> {
+        Affine {
+            normal: SVector::identity(),
+            distance: T::zero(),
+        }
+    }
+
+    /// Set the axis along the center of the cone.
+    pub fn normal(mut self, normal: impl Into<SVector<T, D>>) -> Self {
+        assert!(self.normal.norm() > convert(1e-9));
+
+        self.normal = normal.into().normalize();
+        self
+    }
+
+    /// Set the affine projectors offset distance
+    pub fn distance(mut self, distance: T) -> Self {
+        self.distance = distance;
+        self
+    }
 }
 
 impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for Affine<T, N> {
     #[inline(always)]
     fn project(&self, mut point: SVectorViewMut<T, N>) {
         let dot = point.dot(&self.normal);
-
         if dot > self.distance {
             point -= self.normal.scale(dot - self.distance);
         }

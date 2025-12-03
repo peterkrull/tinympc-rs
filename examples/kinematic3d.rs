@@ -105,10 +105,9 @@ fn main() -> Result<(), Error> {
         radius: 5.0,
     });
 
-    let x_projector_affine = Affine {
-        normal: vector![-1.0, -1.0, 0., 0., 0., 0., 0., 0., 0.],
-        distance: 18.,
-    };
+    let x_projector_affine = Affine::new()
+        .normal([-1.0, -1.0, 0., 0., 0., 0., 0., 0., 0.])
+        .distance(18.0);
 
     // Two (or more!) projectors can be bundled together, saving a pair of slack/dual variables.
     // This should only be done if one constraint cannot immediately invalidate another constrant.
