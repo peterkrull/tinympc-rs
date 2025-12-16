@@ -1,8 +1,8 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use nalgebra::{SMatrix, SVector, matrix, vector};
 use tinympc_rs::{
-    TinyMpc,
-    cache::ArrayCache,
+    Solver,
+    policy::ArrayPolicy,
     project::{ProjectMulti, Sphere},
 };
 
@@ -44,7 +44,7 @@ const RHO: f32 = 4.0;
 
 fn mpc_benchmark(c: &mut Criterion) {
     const NUM_CACHES: usize = 5;
-    type Cache = ArrayCache<f32, NX, NU, NUM_CACHES>;
+    type Cache = ArrayPolicy<f32, NX, NU, NUM_CACHES>;
     let cache = Cache::new(
         RHO,
         10.0,
@@ -58,7 +58,7 @@ fn mpc_benchmark(c: &mut Criterion) {
     )
     .unwrap();
 
-    type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
+    type Mpc = Solver<f32, Cache, NX, NU, HX, HU>;
     let mut mpc = Mpc::new(A, B, cache);
     mpc.config.max_iter = 6;
     mpc.config.do_check = 3;

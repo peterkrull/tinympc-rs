@@ -3,9 +3,9 @@ use std::time::Duration;
 use nalgebra::{SMatrix, SVector, SVectorView, SVectorViewMut, matrix, vector};
 use rerun::Color;
 use tinympc_rs::{
-    Error, TinyMpc,
-    cache::ArrayCache,
-    project::{Affine, Box, Constant, Expand, ProjectExt, ProjectSingle, Sphere},
+    Error, Solver,
+    policy::ArrayPolicy,
+    project::{Affine, Box, ProjectMulti, ProjectMultiExt, ProjectSingleExt, Sphere},
 };
 
 const HX: usize = 150;
@@ -73,10 +73,10 @@ fn main() -> Result<(), Error> {
     let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
     let _puffin_server = puffin_http::Server::new(&server_addr).unwrap();
     eprintln!("Run this to view profiling data:  puffin_viewer {server_addr}");
-    profiling::puffin::set_scopes_on(true);
+    // profiling::puffin::set_scopes_on(true);
 
     const NUM_CACHES: usize = 9;
-    type Cache = ArrayCache<f32, NX, NU, NUM_CACHES>;
+    type Cache = ArrayPolicy<f32, NX, NU, NUM_CACHES>;
     let cache = Cache::new(
         RHO,
         10.0,
@@ -90,9 +90,9 @@ fn main() -> Result<(), Error> {
     )
     .unwrap();
 
-    type Mpc = TinyMpc<f32, Cache, NX, NU, HX, HU>;
+    type Mpc = Solver<f32, Cache, NX, NU, HX, HU>;
     let mut mpc = Mpc::new(A, B, cache).with_sys(sys);
-    mpc.config.max_iter = 10;
+    mpc.config.max_iter = 5;
     mpc.config.do_check = 3;
 
     println!("Size of MPC object: {} bytes", core::mem::size_of_val(&mpc));
@@ -100,24 +100,26 @@ fn main() -> Result<(), Error> {
     let mut x_now = SVector::zeros();
     let mut xref = SMatrix::<f32, NX, HX>::zeros();
 
-    let x_project_sphere = Expand::new([3, 4, 5], Sphere {
-        center: vector![0.0, 0.0, 0.0],
+    let x_project_sphere = Sphere {
+        center: SVector::zeros(),
         radius: 5.0,
-    });
+    }
+    .dim_lift([3, 4, 5]);
 
     let x_projector_affine = Affine::new()
-        .normal([-1.0, -1.0, 0., 0., 0., 0., 0., 0., 0.])
-        .distance(18.0);
+        .normal([-1.0, -1.0])
+        .distance(18.0)
+        .dim_lift([0, 1]);
 
     // Two (or more!) projectors can be bundled together, saving a pair of slack/dual variables.
     // This should only be done if one constraint cannot immediately invalidate another constrant.
-    let x_projector_bundle = (x_project_sphere, x_projector_affine);
+    let x_projector_bundle = (x_project_sphere, x_projector_affine).time_fixed();
 
     // We can also iteratively project a bundle if they could push each other out of feasible region
     // let x_projector_bundle = [&x_projector_bundle; 10];
 
     let u_projector_sphere = Sphere {
-        center: vector![0.0, 0.0, 0.0],
+        center: SVector::zeros(),
         radius: 10.0,
     };
 
@@ -126,10 +128,10 @@ fn main() -> Result<(), Error> {
         lower: vector![-2.0, -2.0, -2.0],
     };
 
-    let u_projector_bundle = (u_projector_sphere, u_projector_box);
+    let u_projector_bundle = (u_projector_sphere, u_projector_box).time_fixed();
 
-    let mut x_con = [Constant::new(x_projector_bundle.clone()).constraint_owned()];
-    let mut u_con = [Constant::new(u_projector_bundle.clone()).constraint_owned()];
+    let mut x_con = [x_projector_bundle.constraint()];
+    let mut u_con = [u_projector_bundle.constraint()];
 
     let mut true_pos = vec![vector![0.0, 0.0, 0.0]];
 
@@ -189,11 +191,11 @@ fn main() -> Result<(), Error> {
         total_iters += solution.iterations;
 
         let mut iteration_cost = 0.0;
-        for col in solution.x_prediction().column_iter() {
+        for col in solution.x_prediction_full().column_iter() {
             iteration_cost += (col.transpose() * SMatrix::from_diagonal(&Q) * col)[0];
         }
 
-        for col in solution.u_prediction().column_iter() {
+        for col in solution.u_prediction_full().column_iter() {
             iteration_cost += (col.transpose() * SMatrix::from_diagonal(&R) * col)[0];
         }
 
@@ -216,7 +218,7 @@ fn main() -> Result<(), Error> {
 
         rec.set_time("timeline", Duration::from_millis((50 * k) as u64));
 
-        let u_mat = mpc.get_u_matrix().clone();
+        let u_mat = solution.u_prediction_full();
         let u_iter = u_mat.column_iter().enumerate();
 
         let u_x = rerun::LineStrip2D::from_iter(
@@ -238,7 +240,7 @@ fn main() -> Result<(), Error> {
         let strips = rerun::LineStrips2D::new([u_x, u_y, u_z]);
         rec.log("u_strips", &strips).unwrap();
 
-        let mut x_mat = mpc.get_x_matrix().clone() + xref;
+        let mut x_mat = solution.x_prediction_full();
         let x_iter = x_mat.column_iter().enumerate();
         let x_x = rerun::LineStrip2D::from_iter(
             x_iter
@@ -277,9 +279,7 @@ fn main() -> Result<(), Error> {
         let strips = rerun::LineStrips2D::new([x_x, x_y, x_z]);
         rec.log("x_vel_strips", &strips).unwrap();
 
-        for mut col in x_mat.column_iter_mut() {
-            x_projector_bundle.project(col.as_view_mut());
-        }
+        x_projector_bundle.project_multi(&mut x_mat);
 
         let x_iter = x_mat.column_iter().enumerate();
         let x_x = rerun::LineStrip2D::from_iter(
@@ -321,7 +321,7 @@ fn main() -> Result<(), Error> {
 
         let x = x_now;
 
-        let vec = mpc.get_x_matrix().column(0) + xref.column(0);
+        let vec = solution.x_prediction(0);
         rec.log(
             "position",
             &rerun::Points3D::new([[vec[0] as f32, vec[1] as f32, vec[2] as f32]])
@@ -357,7 +357,7 @@ fn main() -> Result<(), Error> {
         rec.log("x_position_ref", &strips).unwrap();
 
         let pos_pred_strips = rerun::LineStrip3D::from_iter(
-            (mpc.get_x_matrix() + xref)
+            solution.x_prediction_full()
                 .column_iter()
                 .map(|vec| [vec[0] as f32, vec[1] as f32, vec[2] as f32]),
         );

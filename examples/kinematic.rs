@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use nalgebra::{SMatrix, SVector, matrix, vector};
 use tinympc_rs::{
-    Constant, Error, Expand, TinyMpc, cache::ArrayCache, project::{Box, ProjectExt as _, ProjectSingle}
+    Error, Solver,
+    policy::ArrayPolicy,
+    project::{Box, ProjectMultiExt as _, ProjectSingle, dim::Lift, time::Fixed},
 };
 
 type Float = f64;
@@ -46,7 +48,7 @@ fn main() -> Result<(), Error> {
     let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
     let _puffin_server = puffin_http::Server::new(&server_addr).unwrap();
     eprintln!("Run this to view profiling data:  puffin_viewer {server_addr}");
-    profiling::puffin::set_scopes_on(true);
+    // profiling::puffin::set_scopes_on(true);
 
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
@@ -55,8 +57,8 @@ fn main() -> Result<(), Error> {
         .unwrap();
 
     const NUM_CACHES: usize = 5;
-    type Cache = ArrayCache<Float, NX, NU, NUM_CACHES>;
-    type Mpc = TinyMpc<Float, Cache, NX, NU, HX, HU>;
+    type Cache = ArrayPolicy<Float, NX, NU, NUM_CACHES>;
+    type Mpc = Solver<Float, Cache, NX, NU, HX, HU>;
 
     let cache = Cache::new(RHO, 10.0, 2.0, 1000, &A, &B, &Q, &R, &SMatrix::zeros()).unwrap();
 
@@ -73,19 +75,25 @@ fn main() -> Result<(), Error> {
     let mut x_ref = SMatrix::<Float, NX, HX>::zeros();
 
     // Velocity limiter
-    let x_projector_box = Expand::new([1], Box {
-        upper: vector![0.8],
-        lower: vector![-0.8],
-    });
+    let x_projector_box = Lift::new(
+        [1],
+        Box {
+            upper: vector![0.8],
+            lower: vector![-0.8],
+        },
+    );
 
     // Actuation limiter
-    let u_projector_box = Expand::new([0], Box {
-        upper: vector![0.5],
-        lower: vector![-0.5],
-    });
+    let u_projector_box = Lift::new(
+        [0],
+        Box {
+            upper: vector![0.5],
+            lower: vector![-0.5],
+        },
+    );
 
-    let mut x_con = [Constant::new(&x_projector_box).constraint_owned()];
-    let mut u_con = [Constant::new(&u_projector_box).constraint_owned()];
+    let mut x_con = [Fixed::new(&x_projector_box).constraint_owned()];
+    let mut u_con = [Fixed::new(&u_projector_box).constraint_owned()];
 
     rec.log_static(
         "prim_res",
@@ -143,14 +151,14 @@ fn main() -> Result<(), Error> {
 
         // Apply (constrained) input to system
         let mut u_now = solution.u_now();
-        u_projector_box.project(u_now.as_view_mut());
+        u_projector_box.project_single(u_now.as_view_mut());
         x_now = A * x_now + B * u_now;
 
         // ------ RERUN VISUALIZATION -------
         rec.set_time("timeline", Duration::from_millis((50 * k) as u64));
 
-        let x_mat = solution.x_prediction();
-        let u_mat = solution.u_prediction();
+        let x_mat = solution.x_prediction_full();
+        let u_mat = solution.u_prediction_full();
 
         let x_iter = x_mat.column_iter().enumerate();
         let line_strips: [rerun::LineStrip2D; 3] = core::array::from_fn(|index| {

@@ -45,7 +45,6 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
     }
 
     /// Constrains the set of points, and if `compute_residuals == true`, computes the maximum primal and dual residuals
-    #[inline(always)]
     #[profiling::function]
     pub fn constrain(
         &mut self,
@@ -61,7 +60,6 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
     }
 
     /// Constrains the set of points, and computes the maximum primal and dual residuals
-    #[inline(always)]
     #[profiling::function]
     fn constrain_calc_residuals(
         &mut self,
@@ -77,10 +75,10 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
         if let Some(reference) = reference {
             profiling::scope!("reference offset");
             self.slac += reference;
-            self.projector.project_series(&mut self.slac);
+            self.projector.project_multi(&mut self.slac);
             self.slac -= reference;
         } else {
-            self.projector.project_series(&mut self.slac);
+            self.projector.project_multi(&mut self.slac);
         }
 
         // Compute dual residual
@@ -98,7 +96,6 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
     }
 
     /// Constrains the set of points
-    #[inline(always)]
     #[profiling::function]
     fn constrain_only(&mut self, points: &SMatrix<T, N, H>, reference: Option<&SMatrix<T, N, H>>) {
         // Offset the slack variables by the reference before projecting
@@ -106,10 +103,10 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
         if let Some(reference) = reference {
             profiling::scope!("reference offset");
             self.slac += reference;
-            self.projector.project_series(&mut self.slac);
+            self.projector.project_multi(&mut self.slac);
             self.slac -= reference;
         } else {
-            self.projector.project_series(&mut self.slac);
+            self.projector.project_multi(&mut self.slac);
         }
 
         // Update dual parameters
@@ -118,7 +115,6 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
     }
 
     /// Add the cost associated with this constraints violation to a cost sum
-    #[inline(always)]
     #[profiling::function]
     pub(crate) fn add_cost(&self, cost: &mut SMatrix<T, N, H>) {
         *cost += self.dual;
@@ -126,14 +122,12 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
     }
 
     /// Add the cost associated with this constraints violation to a cost sum
-    #[inline(always)]
     #[profiling::function]
     pub(crate) fn set_cost(&mut self, cost: &mut SMatrix<T, N, H>) {
         self.dual.sub_to(&self.slac, cost);
     }
 
     /// Re-scale the dual variables for when the value of rho has changed
-    #[inline(always)]
     #[profiling::function]
     pub(crate) fn rescale_dual(&mut self, scalar: T) {
         self.dual.scale_mut(scalar);

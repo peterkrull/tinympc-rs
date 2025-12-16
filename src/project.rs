@@ -1,54 +1,29 @@
-use std::marker::PhantomData;
+use core::ops::Range;
 
-use nalgebra::{ComplexField, RealField, SMatrix, SVector, SVectorViewMut, convert};
+use nalgebra::{RealField, SMatrix, SVector, SVectorViewMut, convert};
 
 use crate::constraint::{Constraint, DynConstraint};
-
-/// Can project a multiple points into their feasible region.
-pub trait ProjectMulti<T: RealField + Copy, const D: usize, const H: usize> {
-    fn project_series(&self, points: &mut SMatrix<T, D, H>);
-}
-
-impl<P: ProjectMulti<T, D, H>, T: RealField + Copy, const D: usize, const H: usize>
-    ProjectMulti<T, D, H> for &P
-{
-    fn project_series(&self, points: &mut SMatrix<T, D, H>) {
-        (**self).project_series(points);
-    }
-}
-
-impl<T: RealField + Copy, const D: usize, const H: usize> ProjectMulti<T, D, H>
-    for &dyn ProjectMulti<T, D, H>
-{
-    fn project_series(&self, points: &mut SMatrix<T, D, H>) {
-        (**self).project_series(points);
-    }
-}
-
-impl<T: RealField + Copy, const D: usize, const H: usize> ProjectMulti<T, D, H> for () {
-    fn project_series(&self, _points: &mut SMatrix<T, D, H>) {}
-}
 
 /// Can project a single point into its feasible region.
 pub trait ProjectSingle<T, const D: usize> {
     /// Apply the projection to a single point.
-    fn project(&self, point: SVectorViewMut<T, D>);
+    fn project_single(&self, point: SVectorViewMut<T, D>);
 }
 
 impl<T, const D: usize> ProjectSingle<T, D> for &dyn ProjectSingle<T, D> {
-    fn project(&self, point: SVectorViewMut<T, D>) {
-        (**self).project(point);
+    fn project_single(&self, point: SVectorViewMut<T, D>) {
+        (**self).project_single(point);
     }
 }
 
 impl<P: ProjectSingle<T, D>, T, const D: usize> ProjectSingle<T, D> for &P {
-    fn project(&self, point: SVectorViewMut<T, D>) {
-        (**self).project(point);
+    fn project_single(&self, point: SVectorViewMut<T, D>) {
+        (**self).project_single(point);
     }
 }
 
 impl<T, const D: usize> ProjectSingle<T, D> for () {
-    fn project(&self, mut _point: SVectorViewMut<T, D>) {}
+    fn project_single(&self, mut _point: SVectorViewMut<T, D>) {}
 }
 
 macro_rules! derive_tuple_project {
@@ -56,9 +31,9 @@ macro_rules! derive_tuple_project {
         impl<$($project: ProjectSingle<T, D>),+, T, const D: usize> ProjectSingle<T, D>
             for ( $($project,)+ )
         {
-            fn project(&self, mut point: SVectorViewMut<T, D>) {
+            fn project_single(&self, mut point: SVectorViewMut<T, D>) {
                 $(
-                    self.$number.project(point.as_view_mut());
+                    self.$number.project_single(point.as_view_mut());
                 )+
             }
         }
@@ -76,32 +51,71 @@ derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7}
 derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8}
 derive_tuple_project! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8, P9: 9}
 
-/// Apply the projector `P` to be constant throughout the entire horizon.
-pub struct Constant<P> {
-    project: P,
-}
-
-impl<P> Constant<P> {
-    pub fn new<T, const D: usize>(project: P) -> Constant<P>
-    where
-        P: ProjectSingle<T, D>,
-        T: RealField + Copy,
-    {
-        Constant { project }
-    }
-}
-
-impl<P: ProjectSingle<T, D>, T: RealField + Copy, const D: usize, const H: usize>
-    ProjectMulti<T, D, H> for Constant<P>
+pub trait ProjectSingleExt<T: RealField + Copy, const D: usize>:
+    ProjectSingle<T, D> + Sized
 {
-    fn project_series(&self, points: &mut SMatrix<T, D, H>) {
-        for mut column in points.column_iter_mut() {
-            self.project.project(column.as_view_mut());
-        }
+    fn time_fixed(self) -> time::Fixed<Self> {
+        time::Fixed::new(self)
+    }
+
+    fn time_ranged(self, range: Range<usize>) -> time::Ranged<Self> {
+        time::Ranged::new(self, range)
+    }
+
+    fn dim_lift<const N: usize>(self, indices: [usize; D]) -> dim::Lift<Self, D, N> {
+        dim::Lift::new(indices, self)
     }
 }
 
-pub trait ProjectExt<T: RealField + Copy, const D: usize, const H: usize>:
+impl<P: ProjectSingle<T, D>, T: RealField + Copy, const D: usize> ProjectSingleExt<T, D> for P {}
+
+/// Can project a multiple points into their feasible region.
+pub trait ProjectMulti<T, const D: usize, const H: usize> {
+    fn project_multi(&self, points: &mut SMatrix<T, D, H>);
+}
+
+impl<P: ProjectMulti<T, D, H>, T, const D: usize, const H: usize> ProjectMulti<T, D, H> for &P {
+    fn project_multi(&self, points: &mut SMatrix<T, D, H>) {
+        (**self).project_multi(points);
+    }
+}
+
+impl<T, const D: usize, const H: usize> ProjectMulti<T, D, H> for &dyn ProjectMulti<T, D, H> {
+    fn project_multi(&self, points: &mut SMatrix<T, D, H>) {
+        (**self).project_multi(points);
+    }
+}
+
+impl<T, const D: usize, const H: usize> ProjectMulti<T, D, H> for () {
+    fn project_multi(&self, _points: &mut SMatrix<T, D, H>) {}
+}
+
+macro_rules! derive_tuple_project_multi {
+    ($($project:ident: $number:tt),+) => {
+        impl<$($project: ProjectMulti<T, D, H>),+, T, const D: usize, const H: usize> ProjectMulti<T, D, H>
+            for ( $($project,)+ )
+        {
+            fn project_multi(&self, points: &mut SMatrix<T, D, H>) {
+                $(
+                    self.$number.project_multi(points);
+                )+
+            }
+        }
+    };
+}
+
+derive_tuple_project_multi! {P0: 0}
+derive_tuple_project_multi! {P0: 0, P1: 1}
+derive_tuple_project_multi! {P0: 0, P1: 1, P2: 2}
+derive_tuple_project_multi! {P0: 0, P1: 1, P2: 2, P3: 3}
+derive_tuple_project_multi! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4}
+derive_tuple_project_multi! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5}
+derive_tuple_project_multi! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6}
+derive_tuple_project_multi! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7}
+derive_tuple_project_multi! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8}
+derive_tuple_project_multi! {P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5, P6: 6, P7: 7, P8: 8, P9: 9}
+
+pub trait ProjectMultiExt<T: RealField + Copy, const D: usize, const H: usize>:
     ProjectMulti<T, D, H> + Sized
 {
     fn dynamic(&self) -> &dyn ProjectMulti<T, D, H> {
@@ -121,7 +135,10 @@ pub trait ProjectExt<T: RealField + Copy, const D: usize, const H: usize>:
     }
 }
 
-impl <P: ProjectMulti<T, D, H>, T: RealField + Copy, const D: usize, const H: usize> ProjectExt<T, D, H> for P {}
+impl<P: ProjectMulti<T, D, H>, T: RealField + Copy, const D: usize, const H: usize>
+    ProjectMultiExt<T, D, H> for P
+{
+}
 
 /// A box projection
 #[derive(Debug, Copy, Clone)]
@@ -132,7 +149,7 @@ pub struct Box<T, const N: usize> {
 
 impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for Box<T, N> {
     #[inline(always)]
-    fn project(&self, mut point: SVectorViewMut<T, N>) {
+    fn project_single(&self, mut point: SVectorViewMut<T, N>) {
         for n in 0..N {
             point[n] = point[n].clamp(self.lower[n], self.upper[n]);
         }
@@ -147,8 +164,7 @@ pub struct Sphere<T, const D: usize> {
 }
 
 impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for Sphere<T, N> {
-    #[inline(always)]
-    fn project(&self, mut point: SVectorViewMut<T, N>) {
+    fn project_single(&self, mut point: SVectorViewMut<T, N>) {
         if self.radius <= T::zero() {
             point.copy_from(&self.center);
         } else {
@@ -157,7 +173,8 @@ impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for Sphere<T, N> {
 
             if dist > self.radius {
                 let scale = self.radius / dist;
-                point.copy_from(&(self.center + diff * scale));
+                point.copy_from(&self.center);
+                point.axpy(scale, &diff, T::one());
             }
         }
     }
@@ -171,16 +188,16 @@ pub struct AntiSphere<T, const N: usize> {
 }
 
 impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for AntiSphere<T, N> {
-    #[inline(always)]
-    fn project(&self, mut point: SVectorViewMut<T, N>) {
-        if self.radius.is_zero() {
+    fn project_single(&self, mut point: SVectorViewMut<T, N>) {
+        // Close enough to zero
+        if self.radius < convert(1e-9) {
             return;
         } else {
             let diff = &point - &self.center;
             let dist = diff.norm();
 
             if dist < self.radius {
-                let scale = self.radius / dist.max(convert(1e-9));
+                let scale = self.radius / dist;
                 point.copy_from(&(self.center + diff * scale));
             }
         }
@@ -205,9 +222,8 @@ impl<T: RealField + Copy, const D: usize> Affine<T, D> {
 
     /// Set the axis along the center of the cone.
     pub fn normal(mut self, normal: impl Into<SVector<T, D>>) -> Self {
-        assert!(self.normal.norm() > convert(1e-9));
-
         self.normal = normal.into().normalize();
+        assert!(self.normal.norm() > convert(1e-9));
         self
     }
 
@@ -219,8 +235,7 @@ impl<T: RealField + Copy, const D: usize> Affine<T, D> {
 }
 
 impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for Affine<T, N> {
-    #[inline(always)]
-    fn project(&self, mut point: SVectorViewMut<T, N>) {
+    fn project_single(&self, mut point: SVectorViewMut<T, N>) {
         let dot = point.dot(&self.normal);
         if dot > self.distance {
             point -= self.normal.scale(dot - self.distance);
@@ -266,8 +281,7 @@ impl<T: RealField + Copy, const D: usize> CircularCone<T, D> {
 }
 
 impl<T: RealField + Copy, const D: usize> ProjectSingle<T, D> for CircularCone<T, D> {
-    #[inline(always)]
-    fn project(&self, mut point: SVectorViewMut<T, D>) {
+    fn project_single(&self, mut point: SVectorViewMut<T, D>) {
         // Translate by the tip to get vector v
         let v = &point - &self.vertex;
 
@@ -294,40 +308,129 @@ impl<T: RealField + Copy, const D: usize> ProjectSingle<T, D> for CircularCone<T
     }
 }
 
-/// Expand the projection into a higher dimensional space.
-#[derive(Debug, Clone)]
-pub struct Expand<P, const D: usize, const N: usize> {
-    indices: [usize; D],
-    projector: P,
-    _p: PhantomData<[(); N]>,
-}
+/// Module for dimension modifiers for projectors
+pub mod dim {
+    use core::marker::PhantomData;
 
-impl<P, const D: usize, const N: usize> Expand<P, D, N> {
-    pub fn new(indices: [usize; D], projector: P) -> Self {
-        assert!(indices.iter().all(|e| e < &N));
-        Self {
-            indices,
-            projector,
-            _p: PhantomData,
+    use nalgebra::{RealField, SVector, SVectorViewMut};
+
+    use crate::ProjectSingle;
+
+    /// Lift the projection into a higher dimensional space.
+    #[derive(Debug, Clone)]
+    pub struct Lift<P, const D: usize, const N: usize> {
+        indices: [usize; D],
+        pub projector: P,
+        _p: PhantomData<[(); N]>,
+    }
+
+    impl<P, const D: usize, const N: usize> Lift<P, D, N> {
+        pub fn new(indices: [usize; D], projector: P) -> Self {
+            assert!(indices.iter().all(|e| e < &N));
+            Self {
+                indices,
+                projector,
+                _p: PhantomData,
+            }
+        }
+    }
+
+    impl<P: ProjectSingle<T, D>, T: RealField + Copy, const D: usize, const N: usize>
+        ProjectSingle<T, N> for Lift<P, D, N>
+    {
+        fn project_single(&self, mut point: SVectorViewMut<T, N>) {
+            let mut sub_point: SVector<T, D> = SVector::zeros();
+            for i in 0..D {
+                sub_point[i] = point[self.indices[i]];
+            }
+
+            self.projector.project_single(sub_point.as_view_mut());
+
+            for i in 0..D {
+                point[self.indices[i]] = sub_point[i];
+            }
         }
     }
 }
 
-impl<P: ProjectSingle<T, D>, T: ComplexField + Copy, const D: usize, const N: usize>
-    ProjectSingle<T, N> for Expand<P, D, N>
-{
-    fn project(&self, mut point: SVectorViewMut<T, N>) {
-        assert!(self.indices.iter().all(|e| e < &N));
+/// Module for time modifiers for projectors
+pub mod time {
+    use core::ops::Range;
 
-        let mut sub_point: SVector<T, D> = SVector::zeros();
-        for i in 0..D {
-            sub_point[i] = point[self.indices[i]];
+    use nalgebra::{RealField, SMatrix};
+
+    use crate::{ProjectMulti, ProjectSingle};
+
+    /// Apply the projector `P` to be fixed throughout the entire horizon.
+    pub struct Fixed<P> {
+        pub projector: P,
+    }
+
+    impl<P> Fixed<P> {
+        pub fn new(projector: P) -> Fixed<P> {
+            Fixed { projector }
         }
+    }
 
-        self.projector.project(sub_point.as_view_mut());
+    impl<P: ProjectSingle<T, D>, T: RealField + Copy, const D: usize, const H: usize>
+        ProjectMulti<T, D, H> for Fixed<P>
+    {
+        fn project_multi(&self, points: &mut SMatrix<T, D, H>) {
+            for mut column in points.column_iter_mut() {
+                self.projector.project_single(column.as_view_mut());
+            }
+        }
+    }
 
-        for i in 0..D {
-            point[self.indices[i]] = sub_point[i];
+    /// Apply the projector `P` to be fixed across a range of the horizon.
+    pub struct Ranged<P> {
+        pub projector: P,
+        pub range: Range<usize>,
+    }
+
+    impl<P> Ranged<P> {
+        pub fn new(projector: P, range: Range<usize>) -> Ranged<P> {
+            Ranged { projector, range }
+        }
+    }
+
+    impl<P: ProjectSingle<T, D>, T: RealField + Copy, const D: usize, const H: usize>
+        ProjectMulti<T, D, H> for Ranged<P>
+    {
+        fn project_multi(&self, points: &mut SMatrix<T, D, H>) {
+            for mut column in points
+                .column_iter_mut()
+                .take(self.range.end)
+                .skip(self.range.start)
+            {
+                self.projector.project_single(column.as_view_mut());
+            }
+        }
+    }
+
+    /// Yields a projector for a given index in the time horizon
+    pub struct Func<F> {
+        func: F,
+    }
+
+    impl<F> Func<F> {
+        pub fn new(func: F) -> Func<F> {
+            Func { func }
+        }
+    }
+
+    impl<
+        P: ProjectSingle<T, D>,
+        T: RealField + Copy,
+        F: Fn(usize) -> P,
+        const D: usize,
+        const H: usize,
+    > ProjectMulti<T, D, H> for Func<F>
+    {
+        fn project_multi(&self, points: &mut SMatrix<T, D, H>) {
+            for (index, mut column) in points.column_iter_mut().enumerate() {
+                (self.func)(index).project_single(column.as_view_mut());
+            }
         }
     }
 }

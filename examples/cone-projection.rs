@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use nalgebra::vector;
 use rerun::Color;
-use tinympc_rs::{CircularCone, Error, project::ProjectSingle};
+use tinympc_rs::{Error, project::CircularCone, project::ProjectSingle};
 
 fn main() -> Result<(), Error> {
     simple_logger::SimpleLogger::new()
@@ -14,7 +14,7 @@ fn main() -> Result<(), Error> {
     let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
     let _puffin_server = puffin_http::Server::new(&server_addr).unwrap();
     eprintln!("Run this to view profiling data:  puffin_viewer {server_addr}");
-    profiling::puffin::set_scopes_on(true);
+    // profiling::puffin::set_scopes_on(true);
 
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
@@ -46,7 +46,7 @@ fn main() -> Result<(), Error> {
                 original.push((coord_x, coord_y));
 
                 let mut project = vector![coord_x, coord_y];
-                cone_project.project(project.as_view_mut());
+                cone_project.project_single(project.as_view_mut());
 
                 projected.push((project.x, project.y));
                 arrows.push((project.x - coord_x, project.y - coord_y));

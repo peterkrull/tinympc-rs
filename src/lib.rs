@@ -3,12 +3,13 @@
 
 use nalgebra::{RealField, SMatrix, SVector, SVectorView, SVectorViewMut, Scalar, convert};
 
-pub mod cache;
 pub mod constraint;
+pub mod policy;
 pub mod project;
 
-pub use cache::{Cache, Error};
 pub use constraint::Constraint;
+pub use policy::{Error, Policy};
+
 pub use project::*;
 
 mod util;
@@ -25,15 +26,15 @@ pub enum TerminationReason {
 }
 
 #[derive(Debug)]
-pub struct TinyMpc<
+pub struct Solver<
     T,
-    CACHE: Cache<T, NX, NU>,
+    POLICY: Policy<T, NX, NU>,
     const NX: usize,
     const NU: usize,
     const HX: usize,
     const HU: usize,
 > {
-    cache: CACHE,
+    policy: POLICY,
     state: State<T, NX, NU, HX, HU>,
     pub config: Config<T>,
 }
@@ -97,11 +98,11 @@ pub struct Problem<
     UProj = (),
 > where
     T: Scalar + RealField + Copy,
-    C: Cache<T, NX, NU>,
+    C: Policy<T, NX, NU>,
     XProj: ProjectMulti<T, NX, HX>,
     UProj: ProjectMulti<T, NU, HU>,
 {
-    mpc: &'a mut TinyMpc<T, C, NX, NU, HX, HU>,
+    mpc: &'a mut Solver<T, C, NX, NU, HX, HU>,
     x_now: SVector<T, NX>,
     x_ref: Option<&'a SMatrix<T, NX, HX>>,
     u_ref: Option<&'a SMatrix<T, NU, HU>>,
@@ -113,7 +114,7 @@ impl<'a, T, C, XProj, UProj, const NX: usize, const NU: usize, const HX: usize, 
     Problem<'a, T, C, NX, NU, HX, HU, XProj, UProj>
 where
     T: Scalar + RealField + Copy,
-    C: Cache<T, NX, NU>,
+    C: Policy<T, NX, NU>,
     XProj: ProjectMulti<T, NX, HX>,
     UProj: ProjectMulti<T, NU, HU>,
 {
@@ -160,20 +161,20 @@ where
     }
 
     /// Run the solver
+    #[inline(never)]
     pub fn solve(self) -> Solution<'a, T, NX, NU, HX, HU> {
         self.mpc
             .solve(self.x_now, self.x_ref, self.u_ref, self.x_con, self.u_con)
     }
 }
 
-impl<T, C: Cache<T, NX, NU>, const NX: usize, const NU: usize, const HX: usize, const HU: usize>
-    TinyMpc<T, C, NX, NU, HX, HU>
+impl<T, C: Policy<T, NX, NU>, const NX: usize, const NU: usize, const HX: usize, const HU: usize>
+    Solver<T, C, NX, NU, HX, HU>
 where
     T: Scalar + RealField + Copy,
 {
     #[must_use]
-    #[inline(always)]
-    pub fn new(A: SMatrix<T, NX, NX>, B: SMatrix<T, NX, NU>, cache: C) -> Self {
+    pub fn new(A: SMatrix<T, NX, NX>, B: SMatrix<T, NX, NU>, policy: C) -> Self {
         // Compile-time guard against invalid horizon lengths
         const {
             assert!(HX > HU, "`HX` must be larger than `HU`");
@@ -188,7 +189,7 @@ where
                 do_check: 5,
                 relaxation: T::one(),
             },
-            cache,
+            policy,
             state: State {
                 A,
                 B,
@@ -211,7 +212,6 @@ where
         self
     }
 
-    #[inline(always)]
     pub fn initial_condition(
         &mut self,
         x_now: SVector<T, NX>,
@@ -226,7 +226,6 @@ where
         }
     }
 
-    #[inline(always)]
     pub fn solve<'a>(
         &'a mut self,
         x_now: SVector<T, NX>,
@@ -277,16 +276,14 @@ where
             reason,
             iterations: self.state.iter,
             prim_residual,
-            dual_residual: dual_residual * self.cache.get_active().rho,
+            dual_residual: dual_residual * self.policy.get_active().rho,
         }
     }
 
-    #[inline(always)]
     fn should_compute_residuals(&self) -> bool {
         self.state.iter % self.config.do_check == 0
     }
 
-    #[inline(always)]
     #[profiling::function]
     fn set_initial_conditions(
         &mut self,
@@ -318,17 +315,15 @@ where
         self.update_tracking_mismatch_plqr();
     }
 
-    #[inline(always)]
     fn update_tracking_mismatch_plqr(&mut self) {
         // Note: using `sygemv` to exploit the symmetry of Plqr is actually
         // slower than just doing a regular matrix-vector multiplication,
         // since sygemv adds additional indexing overhead.
-        let cache = self.cache.get_active();
-        cache.Plqr.mul_to(&self.state.cx, &mut self.state.cp);
+        let policy = self.policy.get_active();
+        policy.Plqr.mul_to(&self.state.cx, &mut self.state.cp);
     }
 
     /// Shift the dual variables by one time step for more accurate hot starting
-    #[inline(always)]
     #[profiling::function]
     fn warm_start_constraints(
         &mut self,
@@ -347,7 +342,6 @@ where
     }
 
     /// Update linear control cost terms based on constraint violations
-    #[inline(always)]
     #[profiling::function]
     fn update_cost(
         &mut self,
@@ -355,7 +349,7 @@ where
         u_con: &mut [Constraint<T, impl ProjectMulti<T, NU, HU>, NU, HU>],
     ) {
         let s = &mut self.state;
-        let c = self.cache.get_active();
+        let c = self.policy.get_active();
 
         // Add cost contribution for state constraint violations
         let mut x_con_iter = x_con.iter_mut();
@@ -388,11 +382,10 @@ where
     }
 
     /// Backward pass to update Ricatti variables
-    #[inline(always)]
     #[profiling::function]
     fn backward_pass(&mut self) {
         let s = &mut self.state;
-        let c = self.cache.get_active();
+        let c = self.policy.get_active();
 
         for i in (0..HX - 1).rev() {
             let (mut p_now, mut p_fut) = util::column_pair_mut(&mut s.p, i, i + 1);
@@ -417,11 +410,10 @@ where
     }
 
     /// Use LQR feedback policy to roll out trajectory
-    #[inline(always)]
     #[profiling::function]
     fn forward_pass(&mut self) {
         let s = &mut self.state;
-        let c = self.cache.get_active();
+        let c = self.policy.get_active();
 
         if let Some(system) = s.sys {
             // Roll out trajectory up to the control horizon (HU)
@@ -474,7 +466,6 @@ where
     }
 
     /// Project slack variables into their feasible domain and update dual variables
-    #[inline(always)]
     #[profiling::function]
     fn update_constraints(
         &mut self,
@@ -531,7 +522,6 @@ where
     }
 
     /// Check for termination condition by evaluating residuals
-    #[inline(always)]
     #[profiling::function]
     fn check_termination(
         &mut self,
@@ -540,7 +530,7 @@ where
         x_con: &mut [Constraint<T, impl ProjectMulti<T, NX, HX>, NX, HX>],
         u_con: &mut [Constraint<T, impl ProjectMulti<T, NU, HU>, NU, HU>],
     ) -> bool {
-        let c = self.cache.get_active();
+        let c = self.policy.get_active();
         let cfg = &self.config;
 
         if !self.should_compute_residuals() {
@@ -566,10 +556,10 @@ where
         // Try to adapt rho
         if !terminate
             && let Some(scalar) = self
-                .cache
+                .policy
                 .update_active(*max_prim_residual, *max_dual_residual)
         {
-            profiling::scope!("cache updated, rescale all dual variables");
+            profiling::scope!("policy updated, rescale all dual variables");
 
             self.update_tracking_mismatch_plqr();
 
@@ -583,31 +573,6 @@ where
         }
 
         terminate
-    }
-
-    /// Get the number of iterations of the previous solve
-    pub fn get_num_iters(&self) -> usize {
-        self.state.iter
-    }
-
-    /// Get the system input `u` for the time `i`
-    pub fn get_u_at(&self, i: usize) -> SVector<T, NU> {
-        self.state.eu.column(i).into()
-    }
-
-    /// Get the system input `u` for the current time
-    pub fn get_u(&self) -> SVector<T, NU> {
-        self.state.eu.column(0).into()
-    }
-
-    /// Get reference to matrix containing state predictions
-    pub fn get_x_matrix(&self) -> &SMatrix<T, NX, HX> {
-        &self.state.ex
-    }
-
-    /// Get reference to matrix containing input predictions
-    pub fn get_u_matrix(&self) -> &SMatrix<T, NU, HU> {
-        &self.state.eu
     }
 }
 
@@ -625,8 +590,26 @@ pub struct Solution<'a, T, const NX: usize, const NU: usize, const HX: usize, co
 impl<T: RealField + Copy, const NX: usize, const NU: usize, const HX: usize, const HU: usize>
     Solution<'_, T, NX, NU, HX, HU>
 {
+    /// Get the predicticted states for the `at` index
+    pub fn x_prediction(&self, at: usize) -> SVector<T, NX> {
+        if let Some(x_ref) = self.x_ref.as_ref() {
+            self.x.column(at) + x_ref.column(at)
+        } else {
+            self.x.column(at).clone_owned()
+        }
+    }
+
+    /// Get the predicticted input for the `at` index
+    pub fn u_prediction(&self, at: usize) -> SVector<T, NU> {
+        if let Some(u_ref) = self.u_ref.as_ref() {
+            self.u.column(at) + u_ref.column(at)
+        } else {
+            self.u.column(at).clone_owned()
+        }
+    }
+
     /// Get the predictiction of states for this solution
-    pub fn x_prediction(&self) -> SMatrix<T, NX, HX> {
+    pub fn x_prediction_full(&self) -> SMatrix<T, NX, HX> {
         if let Some(x_ref) = self.x_ref.as_ref() {
             self.x + *x_ref
         } else {
@@ -635,7 +618,7 @@ impl<T: RealField + Copy, const NX: usize, const NU: usize, const HX: usize, con
     }
 
     /// Get the predictiction of inputs for this solution
-    pub fn u_prediction(&self) -> SMatrix<T, NU, HU> {
+    pub fn u_prediction_full(&self) -> SMatrix<T, NU, HU> {
         if let Some(u_ref) = self.u_ref.as_ref() {
             self.u + *u_ref
         } else {
@@ -645,10 +628,6 @@ impl<T: RealField + Copy, const NX: usize, const NU: usize, const HX: usize, con
 
     /// Get the current contron input to be applied
     pub fn u_now(&self) -> SVector<T, NU> {
-        if let Some(u_ref) = self.u_ref.as_ref() {
-            self.u.column(0) + u_ref.column(0)
-        } else {
-            self.u.column(0).into()
-        }
+        self.u_prediction(0)
     }
 }

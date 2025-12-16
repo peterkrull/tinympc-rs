@@ -1,8 +1,8 @@
 use nalgebra::{SMatrix, SVector, matrix, vector};
 use tinympc_rs::{
-    TinyMpc,
-    cache::ArrayCache,
-    project::{Box, Constant, ProjectExt, ProjectSingle},
+    Solver,
+    policy::ArrayPolicy,
+    project::{Box, ProjectMultiExt, ProjectSingle, time::Fixed},
 };
 
 /*
@@ -18,7 +18,7 @@ const HX: usize = 10;
 const HU: usize = 9;
 
 fn main() {
-    type Cache = ArrayCache<Float, 12, 4, 1>;
+    type Cache = ArrayPolicy<Float, 12, 4, 1>;
     let cache = Cache::new(
         RHO,
         10.0,
@@ -32,7 +32,7 @@ fn main() {
     )
     .unwrap();
 
-    type Mpc = TinyMpc<Float, Cache, 12, 4, HX, HU>;
+    type Mpc = Solver<Float, Cache, 12, 4, HX, HU>;
     let mut mpc = Mpc::new(A, B, cache);
 
     // Configure settings
@@ -50,7 +50,7 @@ fn main() {
         upper: SVector::from_element(5.0),
     };
 
-    let xcon_constant = Constant::new(xcon_box1.clone());
+    let xcon_constant = Fixed::new(xcon_box1.clone());
     let mut x_constraints = [xcon_constant.dyn_constraint()];
 
     let ucon_box1 = Box {
@@ -58,7 +58,7 @@ fn main() {
         upper: SVector::from_element(0.4),
     };
 
-    let ucon_constant = Constant::new(ucon_box1.clone());
+    let ucon_constant = Fixed::new(ucon_box1.clone());
     let mut u_constraints = [ucon_constant.dyn_constraint()];
 
     for i in 0..HX {
@@ -88,10 +88,10 @@ fn main() {
         );
 
         // Iterate simulation
-        ucon_box1.project(u_now.as_view_mut());
+        ucon_box1.project_single(u_now.as_view_mut());
         x = A * x + B * u_now;
 
-        total_iters += mpc.get_num_iters();
+        total_iters += solution.iterations;
     }
 
     println!("Total iterations: {total_iters}");
