@@ -209,7 +209,7 @@ pub struct Affine<T, const N: usize> {
     distance: T,
 }
 
-impl <T: RealField + Copy, const D: usize> Default for Affine<T, D> {
+impl<T: RealField + Copy, const D: usize> Default for Affine<T, D> {
     fn default() -> Affine<T, D> {
         Affine {
             normal: SVector::identity(),
@@ -220,6 +220,7 @@ impl <T: RealField + Copy, const D: usize> Default for Affine<T, D> {
 
 impl<T: RealField + Copy, const D: usize> Affine<T, D> {
     /// Create a new [`Affine`] projector with default values.
+    #[must_use]
     pub fn new() -> Affine<T, D> {
         Affine::default()
     }
@@ -265,9 +266,9 @@ impl<T: RealField + Copy, const D: usize> Default for CircularCone<T, D> {
     }
 }
 
-
 impl<T: RealField + Copy, const D: usize> CircularCone<T, D> {
     /// Create a new [`CircularCone`] projector with default values.
+    #[must_use]
     pub fn new() -> CircularCone<T, D> {
         CircularCone::default()
     }
@@ -304,7 +305,8 @@ impl<T: RealField + Copy, const D: usize> ProjectSingle<T, D> for CircularCone<T
         let a = s_v.norm();
 
         // Inside feasible region, do nothing
-        if a <= self.mu * s_n {}
+        if a <= self.mu * s_n {
+        }
         // Inside polar cone, project to tip
         else if (a * self.mu <= -s_n) || a.is_zero() {
             point.copy_from(&self.vertex);

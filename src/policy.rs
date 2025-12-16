@@ -14,7 +14,7 @@ pub enum Error {
 pub trait Policy<T, const NX: usize, const NU: usize> {
     /// Updates which policy is active by evaluating the primal and dual residuals.
     ///
-    /// Returns: A scalar (old_rho/new_rho) to be applied to constraint duals in case the policy changed
+    /// Returns: A scalar (`old_rho/new_rho`) to be applied to constraint duals in case the policy changed
     fn update_active(&mut self, prim_residual: T, dual_residual: T) -> Option<T>;
 
     /// Get a reference to the currently active policy.
@@ -85,7 +85,7 @@ where
         ([].iter())
             .chain(RpBPBi.iter())
             .chain(AmBKt.iter())
-            .all(|x| x.is_finite())
+            .all(nalgebra::ComplexField::is_finite)
             .then_some(FixedPolicy {
                 rho,
                 nKlqr,
@@ -137,7 +137,7 @@ where
         let active_index = NUM / 2;
         let policies = crate::util::try_array_from_fn(|index| {
             let diff = index as i32 - active_index as i32;
-            let mult = factor.powf(convert(diff as f64));
+            let mult = factor.powf(convert(f64::from(diff)));
             let rho = central_rho * mult;
             FixedPolicy::new(rho, iters, A, B, Q, R, S)
         })?;

@@ -53,9 +53,10 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
         reference: Option<&SMatrix<T, N, H>>,
         scratch: &mut SMatrix<T, N, H>,
     ) {
-        match compute_residuals {
-            true => self.constrain_calc_residuals(points, reference, scratch),
-            false => self.constrain_only(points, reference),
+        if compute_residuals {
+            self.constrain_calc_residuals(points, reference, scratch)
+        } else {
+            self.constrain_only(points, reference)
         }
     }
 

@@ -361,7 +361,7 @@ where
             }
             s.q.scale_mut(c.rho);
         } else {
-            s.q = SMatrix::<T, NX, HX>::zeros()
+            s.q = SMatrix::<T, NX, HX>::zeros();
         }
 
         // Add cost contribution for input constraint violations
@@ -374,7 +374,7 @@ where
             }
             s.r.scale_mut(c.rho);
         } else {
-            s.r = SMatrix::<T, NU, HU>::zeros()
+            s.r = SMatrix::<T, NU, HU>::zeros();
         }
 
         // Extract ADMM cost term for Riccati terminal condition
@@ -477,7 +477,10 @@ where
         let compute_residuals = self.should_compute_residuals();
         let s = &mut self.state;
 
-        let (x_points, u_points) = if self.config.relaxation != T::one() {
+        let (x_points, u_points) = if self.config.relaxation == T::one() {
+            // Just use original predictions
+            (&s.ex, &s.eu)
+        } else {
             profiling::scope!("apply relaxation to state and input");
 
             // Use Riccati matrices to store relaxed x and u matrices.
@@ -495,7 +498,7 @@ where
                 }
             }
 
-            for con in  u_con.iter() {
+            for con in u_con.iter() {
                 for (mut prim, slac) in s.r.column_iter_mut().zip(con.slac.column_iter()) {
                     prim.axpy(T::one() - alpha, &slac, T::one());
                 }
@@ -503,9 +506,6 @@ where
 
             // Buffers now contain: x' = alpha * x + (1 - alpha) * z
             (&s.q, &s.r)
-        } else {
-            // Just use original predictions
-            (&s.ex, &s.eu)
         };
 
         // Use cost matrices as scratch buffers
@@ -564,11 +564,11 @@ where
             self.update_tracking_mismatch_plqr();
 
             for con in x_con.iter_mut() {
-                con.rescale_dual(scalar)
+                con.rescale_dual(scalar);
             }
 
             for con in u_con.iter_mut() {
-                con.rescale_dual(scalar)
+                con.rescale_dual(scalar);
             }
         }
 

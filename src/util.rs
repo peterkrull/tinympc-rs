@@ -6,11 +6,11 @@ use nalgebra::{Const, Matrix, RealField, SMatrix, SVectorViewMut, Scalar, ViewSt
 ///
 ///  if indices are out of bounds or if they are the same
 #[inline(always)]
-pub(crate) fn column_pair_mut<'a, T: Scalar, const R: usize, const C: usize>(
-    matrix: &'a mut SMatrix<T, R, C>,
+pub(crate) fn column_pair_mut<T: Scalar, const R: usize, const C: usize>(
+    matrix: &mut SMatrix<T, R, C>,
     column0: usize,
     column1: usize,
-) -> (SVectorViewMut<'a, T, R>, SVectorViewMut<'a, T, R>) {
+) -> (SVectorViewMut<'_, T, R>, SVectorViewMut<'_, T, R>) {
     assert_ne!(column0, column1, "columns must not be same");
     assert!(column0 < C, "column0 is out of bounds");
     assert!(column1 < C, "column1 is out of bounds");
