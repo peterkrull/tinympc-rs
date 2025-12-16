@@ -357,7 +357,8 @@ fn main() -> Result<(), Error> {
         rec.log("x_position_ref", &strips).unwrap();
 
         let pos_pred_strips = rerun::LineStrip3D::from_iter(
-            solution.x_prediction_full()
+            solution
+                .x_prediction_full()
                 .column_iter()
                 .map(|vec| [vec[0] as f32, vec[1] as f32, vec[2] as f32]),
         );

@@ -168,7 +168,7 @@ impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for Sphere<T, N> {
         if self.radius <= T::zero() {
             point.copy_from(&self.center);
         } else {
-            let diff = &point - &self.center;
+            let diff = &point - self.center;
             let dist = diff.norm();
 
             if dist > self.radius {
@@ -190,10 +190,8 @@ pub struct AntiSphere<T, const N: usize> {
 impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for AntiSphere<T, N> {
     fn project_single(&self, mut point: SVectorViewMut<T, N>) {
         // Close enough to zero
-        if self.radius < convert(1e-9) {
-            return;
-        } else {
-            let diff = &point - &self.center;
+        if self.radius > T::zero() {
+            let diff = &point - self.center;
             let dist = diff.norm();
 
             if dist < self.radius {
@@ -211,13 +209,19 @@ pub struct Affine<T, const N: usize> {
     distance: T,
 }
 
-impl<T: RealField + Copy, const D: usize> Affine<T, D> {
-    /// Create a new [`Affine`] projector with default values.
-    pub fn new() -> Affine<T, D> {
+impl <T: RealField + Copy, const D: usize> Default for Affine<T, D> {
+    fn default() -> Affine<T, D> {
         Affine {
             normal: SVector::identity(),
             distance: T::zero(),
         }
+    }
+}
+
+impl<T: RealField + Copy, const D: usize> Affine<T, D> {
+    /// Create a new [`Affine`] projector with default values.
+    pub fn new() -> Affine<T, D> {
+        Affine::default()
     }
 
     /// Set the axis along the center of the cone.
@@ -251,14 +255,21 @@ pub struct CircularCone<T: RealField + Copy, const D: usize> {
     mu: T,
 }
 
-impl<T: RealField + Copy, const D: usize> CircularCone<T, D> {
-    /// Create a new [`CircularCone`] projector with default values.
-    pub fn new() -> CircularCone<T, D> {
+impl<T: RealField + Copy, const D: usize> Default for CircularCone<T, D> {
+    fn default() -> Self {
         CircularCone {
             vertex: SVector::zeros(),
             axis: SVector::identity(),
             mu: nalgebra::convert(1.0),
         }
+    }
+}
+
+
+impl<T: RealField + Copy, const D: usize> CircularCone<T, D> {
+    /// Create a new [`CircularCone`] projector with default values.
+    pub fn new() -> CircularCone<T, D> {
+        CircularCone::default()
     }
 
     /// Set the axis along the center of the cone.
@@ -283,7 +294,7 @@ impl<T: RealField + Copy, const D: usize> CircularCone<T, D> {
 impl<T: RealField + Copy, const D: usize> ProjectSingle<T, D> for CircularCone<T, D> {
     fn project_single(&self, mut point: SVectorViewMut<T, D>) {
         // Translate by the tip to get vector v
-        let v = &point - &self.vertex;
+        let v = &point - self.vertex;
 
         // Decompose v into parallel and orthogonal components
         let s_n = v.dot(&self.axis);
@@ -293,9 +304,7 @@ impl<T: RealField + Copy, const D: usize> ProjectSingle<T, D> for CircularCone<T
         let a = s_v.norm();
 
         // Inside feasible region, do nothing
-        if a <= self.mu * s_n {
-            return;
-        }
+        if a <= self.mu * s_n {}
         // Inside polar cone, project to tip
         else if (a * self.mu <= -s_n) || a.is_zero() {
             point.copy_from(&self.vertex);

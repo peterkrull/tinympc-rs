@@ -281,7 +281,7 @@ where
     }
 
     fn should_compute_residuals(&self) -> bool {
-        self.state.iter % self.config.do_check == 0
+        self.state.iter.is_multiple_of(self.config.do_check)
     }
 
     #[profiling::function]
@@ -294,7 +294,7 @@ where
         if let Some(x_ref) = x_ref {
             profiling::scope!("affine state reference term");
             x_now.sub_to(&x_ref.column(0), &mut self.state.ex.column_mut(0));
-            self.state.A.mul_to(&x_ref, &mut self.state.cx);
+            self.state.A.mul_to(x_ref, &mut self.state.cx);
             for i in 0..HX - 1 {
                 let mut cx_col = self.state.cx.column_mut(i);
                 cx_col.axpy(-T::one(), &x_ref.column(i + 1), T::one());
@@ -489,13 +489,13 @@ where
             s.q.scale_mut(alpha);
             s.r.scale_mut(alpha);
 
-            for con in x_con.as_mut() {
+            for con in x_con.iter() {
                 for (mut prim, slac) in s.q.column_iter_mut().zip(con.slac.column_iter()) {
                     prim.axpy(T::one() - alpha, &slac, T::one());
                 }
             }
 
-            for con in u_con.as_mut() {
+            for con in  u_con.iter() {
                 for (mut prim, slac) in s.r.column_iter_mut().zip(con.slac.column_iter()) {
                     prim.axpy(T::one() - alpha, &slac, T::one());
                 }

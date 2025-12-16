@@ -65,7 +65,7 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
         &mut self,
         points: &SMatrix<T, N, H>,
         reference: Option<&SMatrix<T, N, H>>,
-        mut scratch: &mut SMatrix<T, N, H>,
+        scratch: &mut SMatrix<T, N, H>,
     ) {
         // Initialize with old slac variables for computing dual residual
         scratch.copy_from(&self.slac);
@@ -83,16 +83,16 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
 
         // Compute dual residual
         *scratch -= self.slac;
-        self.max_dual_residual = crate::util::frobenius_norm(&scratch);
+        self.max_dual_residual = crate::util::frobenius_norm(scratch);
 
         // Compute primal residual
-        points.sub_to(&self.slac, &mut scratch);
+        points.sub_to(&self.slac, scratch);
 
         // Update dual parameters
         self.dual += *scratch;
 
         // Compute primal residual
-        self.max_prim_residual = crate::util::frobenius_norm(&scratch);
+        self.max_prim_residual = crate::util::frobenius_norm(scratch);
     }
 
     /// Constrains the set of points

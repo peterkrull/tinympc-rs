@@ -122,6 +122,7 @@ impl<T, const NX: usize, const NU: usize, const NUM: usize> ArrayPolicy<T, NX, N
 where
     T: Scalar + RealField + Copy,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         central_rho: T,
         threshold: T,
@@ -170,11 +171,9 @@ where
             }
         }
         // For much larger dual residuals, decrease rho
-        else if dual_residual > prim_residual * self.threshold {
-            if self.active_index > 0 {
-                self.active_index -= 1;
-                policy = &self.policies[self.active_index];
-            }
+        else if dual_residual > prim_residual * self.threshold && self.active_index > 0 {
+            self.active_index -= 1;
+            policy = &self.policies[self.active_index];
         }
 
         // If the value of rho changed we must also rescale all duals
