@@ -119,18 +119,21 @@ where
     UProj: ProjectMulti<T, NU, HU>,
 {
     /// Set the reference for state variables
+    #[must_use]
     pub fn x_reference(mut self, x_ref: &'a SMatrix<T, NX, HX>) -> Self {
         self.x_ref = Some(x_ref);
         self
     }
 
     /// Set the reference for input variables
+    #[must_use]
     pub fn u_reference(mut self, u_ref: &'a SMatrix<T, NU, HU>) -> Self {
         self.u_ref = Some(u_ref);
         self
     }
 
     /// Set constraints on the state variables
+    #[must_use]
     pub fn x_constraints<Proj: ProjectMulti<T, NX, HX>>(
         self,
         x_con: &'a mut [Constraint<T, Proj, NX, HX>],
@@ -146,6 +149,7 @@ where
     }
 
     /// Set constraints on the input variables
+    #[must_use]
     pub fn u_constraints<Proj: ProjectMulti<T, NU, HU>>(
         self,
         u_con: &'a mut [Constraint<T, Proj, NU, HU>],
@@ -161,6 +165,7 @@ where
     }
 
     /// Run the solver
+    #[must_use]
     #[inline(never)]
     pub fn solve(self) -> Solution<'a, T, NX, NU, HX, HU> {
         self.mpc
@@ -207,11 +212,13 @@ where
         }
     }
 
+    #[must_use]
     pub fn with_sys(mut self, sys: LtiFn<T, NX, NU>) -> Self {
         self.state.sys = Some(sys);
         self
     }
 
+    #[must_use]
     pub fn initial_condition(
         &mut self,
         x_now: SVector<T, NX>,
@@ -226,6 +233,7 @@ where
         }
     }
 
+    #[must_use]
     pub fn solve<'a>(
         &'a mut self,
         x_now: SVector<T, NX>,

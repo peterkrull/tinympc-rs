@@ -5,7 +5,6 @@ use nalgebra::{Const, Matrix, RealField, SMatrix, SVectorViewMut, Scalar, ViewSt
 /// # Panics
 ///
 ///  if indices are out of bounds or if they are the same
-#[inline(always)]
 pub(crate) fn column_pair_mut<T: Scalar, const R: usize, const C: usize>(
     matrix: &mut SMatrix<T, R, C>,
     column0: usize,
@@ -30,7 +29,6 @@ pub(crate) fn column_pair_mut<T: Scalar, const R: usize, const C: usize>(
 }
 
 /// Shifts all columns such that `column[i] <- column[i + 1]` with the last two being identical.
-#[inline(always)]
 pub(crate) fn shift_columns_left<T: Scalar, const R: usize, const C: usize>(
     matrix: &mut SMatrix<T, R, C>,
 ) {

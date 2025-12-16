@@ -44,6 +44,11 @@ impl<T, const NX: usize, const NU: usize> FixedPolicy<T, NX, NU>
 where
     T: Scalar + RealField + Copy,
 {
+    /// Create a new `FixedPolicy`.
+    ///
+    /// # Errors
+    ///
+    /// If the calculated LQR gain is not invertible, or any of the calculated values are not normal.
     pub fn new(
         rho: T,
         iters: usize,
@@ -122,6 +127,11 @@ impl<T, const NX: usize, const NU: usize, const NUM: usize> ArrayPolicy<T, NX, N
 where
     T: Scalar + RealField + Copy,
 {
+    /// Create a new `ArrayPolicy` with a length of `NUM` .
+    ///
+    /// # Errors
+    ///
+    /// If any of calculated LQR gain are not invertible, or any of the calculated values are not normal.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         central_rho: T,

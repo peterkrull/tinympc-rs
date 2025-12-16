@@ -148,7 +148,6 @@ pub struct Box<T, const N: usize> {
 }
 
 impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for Box<T, N> {
-    #[inline(always)]
     fn project_single(&self, mut point: SVectorViewMut<T, N>) {
         for n in 0..N {
             point[n] = point[n].clamp(self.lower[n], self.upper[n]);
@@ -226,13 +225,20 @@ impl<T: RealField + Copy, const D: usize> Affine<T, D> {
     }
 
     /// Set the axis along the center of the cone.
+    ///
+    /// # Panics
+    ///
+    /// If the provided vector has no magnitude.
+    #[must_use]
     pub fn normal(mut self, normal: impl Into<SVector<T, D>>) -> Self {
-        self.normal = normal.into().normalize();
+        self.normal = normal.into();
         assert!(self.normal.norm() > convert(1e-9));
+        self.normal = self.normal.normalize();
         self
     }
 
     /// Set the affine projectors offset distance
+    #[must_use]
     pub fn distance(mut self, distance: T) -> Self {
         self.distance = distance;
         self
@@ -274,18 +280,21 @@ impl<T: RealField + Copy, const D: usize> CircularCone<T, D> {
     }
 
     /// Set the axis along the center of the cone.
+    #[must_use]
     pub fn axis(mut self, axis: impl Into<SVector<T, D>>) -> Self {
         self.axis = axis.into().normalize();
         self
     }
 
     /// Set the coordinate of the cones vertex / tip.
+    #[must_use]
     pub fn vertex(mut self, vertex: impl Into<SVector<T, D>>) -> Self {
         self.vertex = vertex.into();
         self
     }
 
     /// Set the `µ` value, or the "aperture" of the cone.
+    #[must_use]
     pub fn mu(mut self, mu: T) -> Self {
         self.mu = mu.max(T::zero());
         self
@@ -336,6 +345,11 @@ pub mod dim {
     }
 
     impl<P, const D: usize, const N: usize> Lift<P, D, N> {
+        /// Lift the provided projector into a higher-dimensional space
+        /// 
+        /// # Panics
+        /// 
+        /// If any of the provided indeces exceed the higher dimension of `N`
         pub fn new(indices: [usize; D], projector: P) -> Self {
             assert!(indices.iter().all(|e| e < &N));
             Self {
