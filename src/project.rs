@@ -188,7 +188,6 @@ pub struct AntiSphere<T, const N: usize> {
 
 impl<T: RealField + Copy, const N: usize> ProjectSingle<T, N> for AntiSphere<T, N> {
     fn project_single(&self, mut point: SVectorViewMut<T, N>) {
-        // Close enough to zero
         if self.radius > T::zero() {
             let diff = &point - self.center;
             let dist = diff.norm();
@@ -346,9 +345,9 @@ pub mod dim {
 
     impl<P, const D: usize, const N: usize> Lift<P, D, N> {
         /// Lift the provided projector into a higher-dimensional space
-        /// 
+        ///
         /// # Panics
-        /// 
+        ///
         /// If any of the provided indeces exceed the higher dimension of `N`
         pub fn new(indices: [usize; D], projector: P) -> Self {
             assert!(indices.iter().all(|e| e < &N));

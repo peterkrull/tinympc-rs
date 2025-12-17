@@ -234,6 +234,7 @@ where
     }
 
     #[must_use]
+    #[inline(never)]
     pub fn solve<'a>(
         &'a mut self,
         x_now: SVector<T, NX>,

@@ -32,13 +32,9 @@ pub(crate) fn column_pair_mut<T: Scalar, const R: usize, const C: usize>(
 pub(crate) fn shift_columns_left<T: Scalar, const R: usize, const C: usize>(
     matrix: &mut SMatrix<T, R, C>,
 ) {
-    if C > 1 {
-        let element_count = R * (C - 1);
-        let ptr = matrix.as_mut_ptr();
-
-        unsafe {
-            core::ptr::copy(ptr.add(R), ptr, element_count);
-        }
+    for i in 0..C - 1 {
+        let (mut a, b) = column_pair_mut(matrix, i, i + 1);
+        a.copy_from(&b);
     }
 }
 

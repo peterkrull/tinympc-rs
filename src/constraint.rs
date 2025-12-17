@@ -83,14 +83,14 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
         }
 
         // Compute dual residual
-        *scratch -= self.slac;
+        *scratch -= &self.slac;
         self.max_dual_residual = crate::util::frobenius_norm(scratch);
 
         // Compute primal residual
         points.sub_to(&self.slac, scratch);
 
         // Update dual parameters
-        self.dual += *scratch;
+        self.dual += &*scratch;
 
         // Compute primal residual
         self.max_prim_residual = crate::util::frobenius_norm(scratch);
@@ -112,14 +112,14 @@ impl<T: RealField + Copy, const N: usize, const H: usize, P: ProjectMulti<T, N, 
 
         // Update dual parameters
         self.dual += points;
-        self.dual -= self.slac;
+        self.dual -= &self.slac;
     }
 
     /// Add the cost associated with this constraints violation to a cost sum
     #[profiling::function]
     pub(crate) fn add_cost(&self, cost: &mut SMatrix<T, N, H>) {
-        *cost += self.dual;
-        *cost -= self.slac;
+        *cost += &self.dual;
+        *cost -= &self.slac;
     }
 
     /// Add the cost associated with this constraints violation to a cost sum
