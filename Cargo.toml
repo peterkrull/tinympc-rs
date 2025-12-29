@@ -1,6 +1,6 @@
 [package]
 name = "tinympc-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Peter Krull"]
 keywords = ["mpc", "controller", "optimal", "ADMM", "embedded"]
@@ -11,7 +11,7 @@ description = "Linear model predictive control for resources constrained devices
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["profiling", "std"]
+default = []
 profiling = ["profiling/profile-with-puffin", "std"]
 std = []
 
@@ -21,13 +21,8 @@ profiling = { version = "1.0.17" }
 
 [dev-dependencies]
 nalgebra = { version = "0.34", features = ["macros"] }
-criterion = "0.7.0"
 rerun = "0.24.0"
 
 puffin_http = "0.16.1"
 simple_logger = "5.0.0"
 log = "0.4.28"
-
-[[bench]]
-name = "kinematic_bench"
-harness = false
