@@ -281,22 +281,37 @@ impl<T: RealField + Copy, const D: usize> CircularCone<T, D> {
     /// Set the axis along the center of the cone.
     #[must_use]
     pub fn axis(mut self, axis: impl Into<SVector<T, D>>) -> Self {
-        self.axis = axis.into().normalize();
+        self.mut_axis(axis);
         self
+    }
+
+    /// Set the axis along the center of the cone.
+    pub fn mut_axis(&mut self, axis: impl Into<SVector<T, D>>) {
+        self.axis = axis.into().normalize();
     }
 
     /// Set the coordinate of the cones vertex / tip.
     #[must_use]
     pub fn vertex(mut self, vertex: impl Into<SVector<T, D>>) -> Self {
-        self.vertex = vertex.into();
+        self.mut_vertex(vertex);
         self
+    }
+
+    /// Set the coordinate of the cones vertex / tip.
+    pub fn mut_vertex(&mut self, vertex: impl Into<SVector<T, D>>) {
+        self.vertex = vertex.into();
     }
 
     /// Set the `µ` value, or the "aperture" of the cone.
     #[must_use]
     pub fn mu(mut self, mu: T) -> Self {
-        self.mu = mu.max(T::zero());
+        self.mut_mu(mu);
         self
+    }
+
+    /// Set the `µ` value, or the "aperture" of the cone.
+    pub fn mut_mu(&mut self, mu: T) {
+        self.mu = mu.max(T::zero());
     }
 }
 
